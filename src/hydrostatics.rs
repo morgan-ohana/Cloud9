@@ -2,7 +2,7 @@ use std::f64::consts::PI;
 
 const SPACIAL_GRID_NUM: usize = 10000;
 const GG: f64 = 4.301e-6; // Newton constant km^2 kpc / Msun s^2
-const M_P: f64 = 8.41e-58
+const M_P: f64 = 8.41e-58;
 
 fn get_r_points(bounds:(f64, f64)) -> Vec<f64> {
     let mut r_points = Vec::with_capacity(SPACIAL_GRID_NUM);
@@ -45,7 +45,7 @@ fn get_hydrostatic_profile(r_points: Vec<f64>, external_field: Vec<f64>, tempera
         let dr = r_points[i] - r_points[i-1];
         
         // f_ext dr via trapezoid
-        let external_piece = dr * (external_field[i] + external_field[i-1]) / 2.0
+        let external_piece = dr * (external_field[i] + external_field[i-1]) / 2.0;
     
         // enclosed mass 
         let vol = (4.0 * PI / 3.0) * (r_points[i-1].powi(3) - rho_points[i-2].powi(3));
@@ -59,4 +59,8 @@ fn get_hydrostatic_profile(r_points: Vec<f64>, external_field: Vec<f64>, tempera
     }
 
     rho_points
+}
+
+pub fn isothermal_abg_background(temp: f64, alpha: f64, beta: f64, gamma: f64) {
+    
 }
