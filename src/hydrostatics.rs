@@ -2,11 +2,12 @@ use std::f64::consts::PI;
 
 use crate::plotting::plot_function;
 
-const SPACIAL_GRID_NUM: usize = 100000;
+const SPACIAL_GRID_NUM: usize = 1000;
 const GG: f64 = 4.301e-6; // Newton constant km^2 kpc / Msun s^2
 const KM_IN_KPC: f64 = 3.086e16;
-const K_B: f64 = 7.29e-93; // Boltzmanns constant Msun kpc^2 / s^2 K
+//const K_B: f64 = 7.29e-93; // Boltzmanns constant Msun kpc^2 / s^2 K
 const MP_OVER_KB: f64 = 1.15349467e35; // Proton mass over boltzmann constant s^2 K / kpc^2
+pub const M_P: f64 = 8.41e-49; // Proton mass in Msun
 
 fn get_r_points(bounds: (f64, f64)) -> Vec<f64> {
     let mut r_points = Vec::with_capacity(SPACIAL_GRID_NUM);
@@ -42,6 +43,57 @@ fn get_force_points(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
         force_points[i] /= KM_IN_KPC * KM_IN_KPC; // kpc / s^2 
     }
     force_points
+}
+
+fn argswhere(vec: &Vec<f64>, value: f64) -> (usize, usize) {
+    let mut low = 0;
+    let mut high = vec.len() - 1;
+
+    while high - low > 1 {
+        let mid = (high + low) / 2;
+        match value > vec[mid] {
+            true => low = mid,
+            false => high = mid,
+        }
+    }
+
+    (low, high)
+}
+
+fn get_column_density(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
+    // Σ(R) = 2 ∫_0^∞ ρ(√(z² + R²)) dz = 2 ∫_R^∞ [ρ(r) * r / √(r² - R²)] dr
+
+    let mut sigma = vec![0.0; r_points.len()];
+    let z_points = r_points.clone();
+
+    for i in 0..r_points.len() {
+        let r_projected = r_points[i];
+
+        for j in 1..z_points.len() {
+            let z1 = z_points[j - 1];
+            let z2 = z_points[j];
+            let dz = z2 - z1;
+            let r1 = (z1.powi(2) + r_projected.powi(2)).sqrt();
+            let r2 = (z2.powi(2) + r_projected.powi(2)).sqrt();
+
+            if &r2 > r_points.last().unwrap() {
+                break;
+            }
+
+            let rho1 = {
+                let (low, high) = argswhere(&r_points, r1);
+                let t = (r1 - r_points[low]) / (r_points[high] - r_points[low]);
+                t * rho_points[high] + (1.0 - t) * rho_points[low]
+            };
+            let rho2 = {
+                let (low, high) = argswhere(&r_points, r2);
+                let t = (r2 - r_points[low]) / (r_points[high] - r_points[low]);
+                t * rho_points[high] + (1.0 - t) * rho_points[low]
+            };
+            sigma[i] += (rho1 + rho2) * dz;
+        }
+    }
+    sigma
 }
 
 fn get_hydrostatic_profile(
@@ -108,13 +160,77 @@ pub fn isothermal_abg_background(
     let rho_points =
         get_hydrostatic_profile(&r_points, external_field, temperature_points, rho_center);
 
+    let number_density = {
+        let mut num_density = Vec::with_capacity(rho_points.len());
+        for i in 0..rho_points.len() {
+            num_density.push(rho_points[i] / M_P)
+        }
+        num_density
+    };
+
     plot_function(
         &r_points,
-        &rho_points,
+        &number_density,
         "profile.png",
         "hydrostatic profile",
         "r (kpc)",
-        "rho (M_sun / kpc^3)",
+        "n_H (num / kpc^3)",
     )
     .unwrap();
+
+    let column_density = get_column_density(number_density, &r_points);
+
+    plot_function(
+        &r_points,
+        &column_density,
+        "column.png",
+        "hydrostatic column density",
+        "r (kpc)",
+        "n_H (num / kpc^2)",
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_column_density() {
+        let r_points = get_r_points((1e-3, 1e3));
+        let rho_points = get_rho_points(|r: f64| r.powi(-2), &r_points);
+        //dbg!(&rho_points);
+        let column_density = get_column_density(rho_points, &r_points);
+
+        let r_max = r_points.last().unwrap();
+        let analytic_column_density = get_rho_points(
+            |r: f64| 2.0 * ((r_max.powi(2) - r.powi(2)).sqrt() / r).atan() * r.powi(-1),
+            &r_points,
+        );
+
+        let err = {
+            let mut err = Vec::with_capacity(r_points.len());
+            for i in 0..r_points.len() {
+                err.push(
+                    (column_density[i] - analytic_column_density[i])
+                        / (analytic_column_density[i] + 1e-15),
+                )
+            }
+            err
+        };
+
+        let rms_err: f64 = {
+            let mut rms_err: f64 = 0.0;
+            for i in 0..err.len() {
+                rms_err += err[i].powi(2)
+            }
+            rms_err /= err.len() as f64;
+            rms_err.sqrt()
+        };
+
+        if rms_err > 0.01 || !rms_err.is_finite() {
+            dbg!(err);
+            panic!("rms error too high! rms_err = {rms_err}")
+        }
+    }
 }

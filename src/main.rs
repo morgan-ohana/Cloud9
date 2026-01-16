@@ -4,5 +4,15 @@ mod hydrostatics;
 mod plotting;
 
 fn main() {
-    isothermal_abg_background(300.0, 1.0, 3.0, 1.0, 0.0e7, 3.0, 1.0e3);
+    let init_num_density = 2e18;
+
+    isothermal_abg_background(
+        300.0,
+        1.0,
+        3.0,
+        1.0,
+        1.0e7,
+        3.0,
+        init_num_density * hydrostatics::M_P,
+    );
 }
