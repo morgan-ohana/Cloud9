@@ -23,7 +23,7 @@ pub fn plot_function(
         }
     }
 
-    println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
+    //println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
 
     let x_range = (x_points[0]..x_points[x_points.len() - 1]).log_scale();
 
@@ -76,6 +76,6 @@ pub fn plot_function(
     chart.draw_series(LineSeries::new(plot_profile, &BLUE))?;
 
     root.present()?;
-    println!("Plot saved as {}", filename);
+    //println!("Plot saved as {}", filename);
     Ok(())
 }
