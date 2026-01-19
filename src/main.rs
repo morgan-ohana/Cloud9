@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use crate::hydrostatics::isothermal_abg_background;
+use crate::hydrostatics::{isothermal_abg_background, isothermal_core_collapse_background};
 
 mod hydrostatics;
 mod plotting;
@@ -23,14 +23,23 @@ fn main() {
     let scale_radius = sound_speed_squared.sqrt() / (4.0 * PI * hydrostatics::GG * rho_center_approx);
     println!("Center rho set to: {rho_center_approx}");
 
-    isothermal_abg_background(
+    // isothermal_abg_background(
+    //     temperature,
+    //     1.0,
+    //     3.0,
+    //     1.0,
+    //     0.0e7,
+    //     3.0,
+    //     (1e-1, 10.0*scale_radius),
+    //     rho_center_approx,
+    // );
+
+    isothermal_core_collapse_background(
         temperature,
-        1.0,
+        3e7,
         3.0,
-        1.0,
-        0.0e7,
-        3.0,
+        0.2,
         (1e-1, 10.0*scale_radius),
-        rho_center_approx,
+        rho_center_approx
     );
 }

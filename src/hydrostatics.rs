@@ -212,6 +212,81 @@ pub fn isothermal_abg_background(
     .unwrap();
 }
 
+pub fn isothermal_core_collapse_background(
+    temp: f64,
+    rho_s_0: f64,
+    r_s_0: f64,
+    collapse_progress: f64,
+    bounds: (f64, f64),
+    rho_center: f64,
+) {
+    let rho = |r: f64| -> f64 {
+        // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
+        let tau = collapse_progress;
+        let rho_s = rho_s_0 * (2.033 + 0.7381*tau + 7.264*tau.powi(5) - 12.73*tau.powi(7) + 9.915*tau.powi(9) + (1.0 - 2.033)*(tau + 0.001).ln()/(0.001_f64).ln());
+        let r_s = r_s_0 * (0.7178 - 0.1026*tau + 0.2474*tau.powi(2) - 0.4079*tau.powi(3) + (1.0 - 0.7178)*(tau + 0.001).ln()/(0.001_f64).ln());
+        let r_c = r_s_0 * (2.555*tau.sqrt() - 3.632*tau + 2.131*tau.powi(2) - 1.415*tau.powi(3) + 0.4683*tau.powi(4));
+
+        rho_s / (((r.powi(4) + r_c.powi(4)).sqrt().sqrt()/r_s) * (1.0 + (r/r_s)).powi(2))
+    };
+
+    let r_points = get_r_points(bounds);
+
+    let dark_matter_rho_points = get_rho_points(rho, &r_points);
+
+    let external_field = get_force_points(dark_matter_rho_points, &r_points);
+
+    let temperature_points = vec![temp; r_points.len()];
+
+    let rho_points =
+        get_hydrostatic_profile(&r_points, external_field, temperature_points, rho_center);
+
+    let number_density = {
+        let mut num_density = Vec::with_capacity(rho_points.len());
+        for i in 0..rho_points.len() {
+            num_density.push(rho_points[i] / M_PROTON)
+        }
+        num_density
+    };
+
+    plot_function(
+        &r_points,
+        &number_density,
+        "profile.png",
+        "hydrostatic profile",
+        "r (kpc)",
+        "n_H (num / kpc^3)",
+    )
+    .unwrap();
+
+    let column_density = {
+        let mut col_dens = get_column_density(number_density, &r_points);
+        for i in 0..col_dens.len() {
+            col_dens[i] /= CM_IN_KPC.powi(2);
+        }
+        col_dens
+    };
+
+    let angular_points = {
+        let mut ang_points = r_points.clone();
+        for i in 0..ang_points.len() {
+            ang_points[i] /= DISTANCE; // radians
+            ang_points[i] /= ARC_MIN; // arc mins
+        }
+        ang_points
+    };
+
+    plot_function(
+        &angular_points,
+        &column_density,
+        "column.png",
+        "hydrostatic column density",
+        "r (arcmin)",
+        "n_H (num / cm^2)",
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
