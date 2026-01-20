@@ -181,6 +181,8 @@ pub fn isothermal_abg_background(
         "hydrostatic profile",
         "r (kpc)",
         "n_H (num / kpc^3)",
+        None,
+        None
     )
     .unwrap();
 
@@ -208,6 +210,8 @@ pub fn isothermal_abg_background(
         "hydrostatic column density",
         "r (arcmin)",
         "n_H (num / cm^2)",
+        None,
+        None
     )
     .unwrap();
 }
@@ -219,7 +223,8 @@ pub fn isothermal_core_collapse_background(
     collapse_progress: f64,
     bounds: (f64, f64),
     rho_center: f64,
-) {
+    plot: bool,
+) -> (Vec<f64>, Vec<f64>) {
     let rho = |r: f64| -> f64 {
         // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
         let tau = collapse_progress;
@@ -249,15 +254,20 @@ pub fn isothermal_core_collapse_background(
         num_density
     };
 
-    plot_function(
-        &r_points,
-        &number_density,
-        "profile.png",
-        "hydrostatic profile",
-        "r (kpc)",
-        "n_H (num / kpc^3)",
-    )
-    .unwrap();
+    if plot {
+        plot_function(
+            &r_points,
+            &number_density,
+            "profile.png",
+            "hydrostatic profile",
+            "r (kpc)",
+            "n_H (num / kpc^3)",
+            None,
+            None
+        )
+        .unwrap();
+    }
+    
 
     let column_density = {
         let mut col_dens = get_column_density(number_density, &r_points);
@@ -276,15 +286,21 @@ pub fn isothermal_core_collapse_background(
         ang_points
     };
 
-    plot_function(
-        &angular_points,
-        &column_density,
-        "column.png",
-        "hydrostatic column density",
-        "r (arcmin)",
-        "n_H (num / cm^2)",
-    )
-    .unwrap();
+    if plot {
+        plot_function(
+            &angular_points,
+            &column_density,
+            "column.png",
+            "hydrostatic column density",
+            "r (arcmin)",
+            "n_H (num / cm^2)",
+            None,
+            None
+        )
+        .unwrap();
+    }
+
+    (angular_points, column_density)
 }
 
 #[cfg(test)]
@@ -326,7 +342,7 @@ mod tests {
 
         if rms_err > 0.01 || !rms_err.is_finite() {
             //dbg!(err);
-            plot_function(&r_points, &err, "column_err_check.png", "Column Density Error", "r (kpc)", "% err").unwrap();
+            plot_function(&r_points, &err, "column_err_check.png", "Column Density Error", "r (kpc)", "% err", None, None).unwrap();
             panic!("rms error too high! rms_err = {rms_err}")
         }
     }
@@ -366,7 +382,7 @@ mod tests {
 
         if rms_err > 0.01 || !rms_err.is_finite() {
             //dbg!(err);
-            plot_function(&r_points, &err, "column_err_check2.png", "Column Density Error", "r (kpc)", "% err").unwrap();
+            plot_function(&r_points, &err, "column_err_check2.png", "Column Density Error", "r (kpc)", "% err", None, None).unwrap();
             panic!("rms error too high! rms_err = {rms_err}")
         }
     }
