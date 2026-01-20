@@ -1,30 +1,37 @@
 use std::f64::consts::PI;
 
-use crate::hydrostatics::{isothermal_abg_background, isothermal_core_collapse_background};
 use crate::fitting::find_parameters;
+use crate::halo::Halo;
+use crate::hydrostatics::{
+    CM_IN_KPC, GG, KM_IN_KPC, isothermal_abg_background, isothermal_core_collapse_background,
+};
 use crate::plotting::plot_function;
 
+mod fitting;
+mod halo;
 mod hydrostatics;
 mod plotting;
-mod fitting;
+
+const S_IN_GYR: f64 = 3.154e16;
+const G_IN_MSUN: f64 = 1.988e33;
 
 fn main() {
     let data = vec![
-        (0.15649748494408605,	15595734576138530000.0),
-        (0.18722388772639217,	15290963190523656000.0),
-        (0.2252243432550796,	14924613361774703000.0),
-        (0.26936457583283363,	14424784086219026000.0),
-        (0.32301280500582225,	13894659794863262000.0),
-        (0.38799031821006913,	13091285860285037000.0),
-        (0.4647330501352986,	12151824423121148000.0),
-        (0.5571917155289376,	11103690653134041000.0),
-        (0.6692414165028057,	9918955303017603000.0),
-        (0.801419168108796, 	8606124456897346000.0),
-        (0.9595907722097119,	7014426686842890000.0),
-        (1.1500508076747187,	5250966932011177000.0),
-        (1.3771319397378698,	3511010519320841000.0),
-        (1.6463993031339876,	2293590617222256000.0),
-        (1.983419488324015,	    1615272370298475800.0),
+        (0.15649748494408605, 15595734576138530000.0),
+        (0.18722388772639217, 15290963190523656000.0),
+        (0.2252243432550796, 14924613361774703000.0),
+        (0.26936457583283363, 14424784086219026000.0),
+        (0.32301280500582225, 13894659794863262000.0),
+        (0.38799031821006913, 13091285860285037000.0),
+        (0.4647330501352986, 12151824423121148000.0),
+        (0.5571917155289376, 11103690653134041000.0),
+        (0.6692414165028057, 9918955303017603000.0),
+        (0.801419168108796, 8606124456897346000.0),
+        (0.9595907722097119, 7014426686842890000.0),
+        (1.1500508076747187, 5250966932011177000.0),
+        (1.3771319397378698, 3511010519320841000.0),
+        (1.6463993031339876, 2293590617222256000.0),
+        (1.983419488324015, 1615272370298475800.0),
     ];
 
     let sidm_fit_params = [
@@ -40,22 +47,37 @@ fn main() {
         0.0,
         169116.20672504138,
     ];
-    
+
     //let params = find_parameters(&data, [2e7, 4.0, 0.2, 5e5], Some(0.0));
     let params = cdm_fit_params;
 
-    dbg!(params);
+    // dbg!(params);
+
+    let t = 10.0;
+    let t_c = t / params[2];
+    // [G rho] = km^2 kpc M_sun^-1 s^-2 * M_sun kpc^-3 = km^2 kpc^-2 s^-2
+    // sigma_m = gyr^-1 M_sun^-1 kpc^2 kpc s km^-1 = (s/gyr) kpc^2 (kpc/km) M_sun^-1
+    let mut sigma_m = 150.0
+        / (0.75 * t_c * params[0] * params[1] * (4.0 * PI * GG * params[0]).sqrt())
+        * (KM_IN_KPC / S_IN_GYR); // kpc^2 / M_sun
+    sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // cm^2 / g
+
+    println!("sigma_m = {sigma_m} \nt_c = {t_c}");
+
     let fit = isothermal_core_collapse_background(
         1e4,
         params[0],
         params[1],
         params[2],
-        (0.1*data[0].0, 10.0*data.last().unwrap().0),
+        (0.1 * data[0].0, 10.0 * data.last().unwrap().0),
         params[3],
-        false
+        false,
     );
 
-    let legend_text = format!("rho_s_0: {}\nr_s_0: {}\ntau: {}\nrho_c: {}", params[0], params[1], params[2], params[3]); 
+    let legend_text = format!(
+        "rho_s_0: {}\nr_s_0: {}\ntau: {}\nrho_c: {}",
+        params[0], params[1], params[2], params[3]
+    );
     println!("{}", &legend_text);
 
     plot_function(
@@ -66,26 +88,39 @@ fn main() {
         "r (arcmin)",
         "n_H (num / cm^2)",
         Some(legend_text),
-        Some(&data)
-    ).unwrap();
+        Some(&data),
+    )
+    .unwrap();
+
+    let halo = Halo::NFW(params[0], params[1]);
+    println!(
+        "r200 = {}, m200 = {}, c200 = {} \ndeviation = {}",
+        halo.r200().unwrap(),
+        halo.m200().unwrap(),
+        halo.c200().unwrap(),
+        halo.deviation().unwrap()
+    );
 }
 
 fn plot_distribution() {
     let target_init_num_col_density = 1e19;
-    let target_init_col_density: f64 = target_init_num_col_density * hydrostatics::M_PROTON * hydrostatics::CM_IN_KPC.powi(2);
+    let target_init_col_density: f64 =
+        target_init_num_col_density * hydrostatics::M_PROTON * hydrostatics::CM_IN_KPC.powi(2);
     let temperature = 1e4;
     let mut sound_speed_squared = temperature / (hydrostatics::MP_OVER_KB); // kpc^2 / s^2
     sound_speed_squared *= hydrostatics::KM_IN_KPC.powi(2); // km^2 / s^2
-    
+
     // r_s = c_s / sqrt(4pi G rho_c)
     // uniform sphere approx:
-    // Sigma ~ 2*r_s*rho_c = 2 c_s sqrt(rho_c / 4pi G) => rho_c ~ 4pi G * (Sigma / 2c_s)^2 = pi G Sigma^2 / c_s^2 
-    // rho_c (kpc^-3) ~ pi G * (n_sigma (cm^-2) * MP * CMinKPC^2)^2 / c_s^2 
+    // Sigma ~ 2*r_s*rho_c = 2 c_s sqrt(rho_c / 4pi G) => rho_c ~ 4pi G * (Sigma / 2c_s)^2 = pi G Sigma^2 / c_s^2
+    // rho_c (kpc^-3) ~ pi G * (n_sigma (cm^-2) * MP * CMinKPC^2)^2 / c_s^2
     // Units: [rho_c] = M_sun kpc^-3 = [G * sigma^2 / c_s^2] = km^2 kpc M_sun^-1 s^-2 * M_sun^2 kpc^-4 * [c_s]^-2 = km^2 kpc^-3 M_sun s^-2 * [c_s]^-2
     // => [c_s^2] = km^2 kpc^-3 M_sun s^-2 / M_sun kpc^-3 = km^2 / s^2
-    
-    let rho_center_approx = PI * hydrostatics::GG * (target_init_col_density).powi(2) / sound_speed_squared;
-    let scale_radius = sound_speed_squared.sqrt() / (4.0 * PI * hydrostatics::GG * rho_center_approx);
+
+    let rho_center_approx =
+        PI * hydrostatics::GG * (target_init_col_density).powi(2) / sound_speed_squared;
+    let scale_radius =
+        sound_speed_squared.sqrt() / (4.0 * PI * hydrostatics::GG * rho_center_approx);
     println!("Center rho set to: {rho_center_approx}");
 
     // isothermal_abg_background(
@@ -104,8 +139,8 @@ fn plot_distribution() {
         3e7,
         3.0,
         0.2,
-        (1e-1, 10.0*scale_radius),
+        (1e-1, 10.0 * scale_radius),
         rho_center_approx,
-        true
+        true,
     );
 }
