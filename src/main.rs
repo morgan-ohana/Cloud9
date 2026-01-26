@@ -1,11 +1,11 @@
 use std::f64::consts::PI;
 
-use crate::fitting::find_parameters;
 use crate::halo::Halo;
 use crate::hydrostatics::{
     CM_IN_KPC, GG, KM_IN_KPC, isothermal_abg_background, isothermal_core_collapse_background,
 };
-use crate::plotting::plot_function;
+use crate::fitting::{find_parameters_mcmc, find_parameters_gradient_descent};
+use crate::plotting::{create_corner_plot, plot_function};
 
 mod fitting;
 mod halo;
@@ -34,6 +34,7 @@ fn main() {
         (1.983419488324015, 1615272370298475800.0),
     ];
 
+    // Found by grad descent:
     let sidm_fit_params = [
         6282772.676310997,
         2.8897601910357062,
@@ -48,10 +49,19 @@ fn main() {
         169116.20672504138,
     ];
 
-    //let params = find_parameters(&data, [2e7, 4.0, 0.2, 5e5], Some(0.0));
-    let params = cdm_fit_params;
+    let (params, chain, likelihoods) = find_parameters_mcmc(
+        &data,
+        //[1e8, 5.0, 0.5, 1e4], //bad guess
+        [2e7, 4.0, 0.2, 5e5],
+        None,
+        10000,
+        1000,
+    );
+    //let params = cdm_fit_params;
 
-    // dbg!(params);
+    check_chain_behavior(&chain);   
+
+    create_corner_plot(&chain, &["rho_s_0", "r_s_0", "tau", "rho_c"], "corner_plot.png", 0.2).unwrap();
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -75,7 +85,7 @@ fn main() {
     );
 
     let legend_text = format!(
-        "rho_s_0: {}\nr_s_0: {}\ntau: {}\nrho_c: {}",
+        "rho_s_0: {:.4e}\nr_s_0: {:.4e}\ntau: {}\nrho_c: {:.4e}",
         params[0], params[1], params[2], params[3]
     );
     println!("{}", &legend_text);
@@ -94,12 +104,33 @@ fn main() {
 
     let halo = Halo::NFW(params[0], params[1]);
     println!(
-        "r200 = {}, m200 = {}, c200 = {} \ndeviation = {}",
+        "r200 = {}, m200 = {:.4e}, c200 = {} \ndeviation = {}",
         halo.r200().unwrap(),
         halo.m200().unwrap(),
         halo.c200().unwrap(),
         halo.deviation().unwrap()
     );
+}
+
+fn check_chain_behavior(chain: &[[f64; 4]]) {
+    for i in 0..4 {
+        let values: Vec<f64> = chain.iter().map(|p| p[i]).collect();
+        let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
+        let variance: f64 = values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let std = variance.sqrt();
+        
+        // Compare std to mean
+        let relative_std = std / mean.abs();
+        println!("Param[{}]: mean = {:.6e}, std = {:.6e}, std/mean = {:.6e}", 
+            i, mean, std, relative_std);
+        
+        // For a narrow peak, std/mean should be small but > 0
+        if relative_std < 1e-6 {
+            println!("Warning: Chain may be stuck, not mixing!");
+        } else if relative_std < 0.01 {
+            println!("Info: Very narrow posterior (well-constrained parameter)");
+        }
+    }
 }
 
 fn plot_distribution() {
