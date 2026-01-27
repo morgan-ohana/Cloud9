@@ -418,6 +418,10 @@ fn plot_2d_contours(
             }
         }
         
+        let mut chart = ChartBuilder::on(area)
+            .margin_left(LABEL_WIDTH).margin_bottom(LABEL_WIDTH)
+            .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+
         // Draw contour lines at 10%, 30%, 50%, 70%, 90%
         let contours = [0.1, 0.3, 0.5, 0.7, 0.9];
         
@@ -442,12 +446,10 @@ fn plot_2d_contours(
                     }
                 }
             }
+
+            dbg!(&points);
             
             if !points.is_empty() {
-                let mut chart = ChartBuilder::on(area)
-                    .margin_left(LABEL_WIDTH).margin_bottom(LABEL_WIDTH)
-                    .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
-                
                 chart.draw_series(
                     AreaSeries::new(points, 0.0, BLUE.mix(level as f64 * 0.3))
                 )?;
