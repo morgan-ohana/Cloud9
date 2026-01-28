@@ -1,13 +1,14 @@
-use std::{f64::consts::PI, path::MAIN_SEPARATOR_STR, str::FromStr};
+use std::{f64::consts::PI, str::FromStr};
 
 use crate::hydrostatics::GG;
 
-const M_IN_KPC: f64 = 3.0857e19;
-const KG_IN_MSUN: f64 = 1.989e30;
+const _M_IN_KPC: f64 = 3.0857e19;
+const _KG_IN_MSUN: f64 = 1.989e30;
 
-const HH: f64 = 0.671; // normalization constant
+const HH: f64 = 0.671; // normalization factor for hubble constant
 const HUBBLE: f64 = 0.0671; // hubble const km / s kpc
-const _RHOCRIT: f64 = 1.8791 * (HH * HH) * 1e-26 * (M_IN_KPC * M_IN_KPC * M_IN_KPC) / KG_IN_MSUN; // Halobos calculation, contains magic numbers I don't understand
+const _RHOCRIT: f64 =
+    1.8791 * (HH * HH) * 1e-26 * (_M_IN_KPC * _M_IN_KPC * _M_IN_KPC) / _KG_IN_MSUN; // Halobos calculation, contains magic numbers I don't understand
 const RHOCRIT: f64 = 3.0 * (HUBBLE * HUBBLE) / (8.0 * PI * GG); // My calculation
 
 pub enum Halo {
@@ -33,33 +34,64 @@ impl Halo {
     }
 
     pub fn r200(&self) -> Result<f64, String> {
-        let mut r200 = self.scale_radius(); // initial guess (definitely wrong but right order of magnitude)
-        let mut rho_enc = self.enclosed_mass(r200) / (4.0 * PI * r200.powi(3) / 3.0);
-        let mut diff = (rho_enc - 200.0 * RHOCRIT) / (200.0 * RHOCRIT);
+        match self {
+            Halo::NFW(_rho_s, r_s) => {
+                dbg!("I am law abidding code");
+                let c200 = self.c200()?;
+                Ok(c200 * r_s)
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                dbg!("hehe illegal code is running");
+                let mut r200 = self.scale_radius(); // initial guess (definitely wrong but right order of magnitude)
+                let mut rho_enc = self.enclosed_mass(r200) / (4.0 * PI * r200.powi(3) / 3.0);
+                let mut diff = (rho_enc - 200.0 * RHOCRIT) / (200.0 * RHOCRIT);
 
-        let mut n = 0;
-        const TOLERANCE: f64 = 1e-5;
-        while diff.abs() > TOLERANCE {
-            r200 += diff * self.scale_radius() * (1.0_f64 - 1e-3).powi(n);
-            rho_enc = self.enclosed_mass(r200) / (4.0 * PI * r200.powi(3) / 3.0);
-            diff = (rho_enc - 200.0 * RHOCRIT) / (200.0 * RHOCRIT);
-            n += 1;
+                let mut n = 0;
+                const TOLERANCE: f64 = 1e-5;
+                while diff.abs() > TOLERANCE {
+                    r200 += diff * self.scale_radius() * (1.0_f64 - 1e-3).powi(n);
+                    rho_enc = self.enclosed_mass(r200) / (4.0 * PI * r200.powi(3) / 3.0);
+                    diff = (rho_enc - 200.0 * RHOCRIT) / (200.0 * RHOCRIT);
+                    n += 1;
 
-            if n >= 1000 {
-                return Err(String::from_str("Failed to converge on r200!").unwrap());
+                    if n >= 1000 {
+                        return Err(String::from_str("Failed to converge on r200!").unwrap());
+                    }
+                }
+                Ok(r200)
             }
         }
-
-        Ok(r200)
     }
 
     pub fn m200(&self) -> Result<f64, String> {
+        dbg!("HUUUHHH");
+        println!("HAAAAAAAH");
         Ok(self.enclosed_mass(self.r200()?))
     }
 
     pub fn c200(&self) -> Result<f64, String> {
         match self {
-            Halo::NFW(_rho_s, r_s) => Ok(self.r200()? / r_s),
+            Halo::NFW(rho_s, _r_s) => {
+                let mut c200: f64 = 1.0; // initial guess, def wrong, right order of magnitude
+                let mut value = ((1.0 + c200).ln() - (c200 / (1.0 + c200))) / c200.powi(3);
+                let target = 3.0 * 200.0 * RHOCRIT / rho_s;
+                let mut diff = (value - target) / target;
+
+                let mut n = 0;
+                const TOLERANCE: f64 = 1e-5;
+                while diff.abs() > TOLERANCE {
+                    c200 += diff * (1.0_f64 - 1e-3).powi(n);
+                    value = ((1.0 + c200).ln() - (c200 / (1.0 + c200))) / c200.powi(3);
+                    diff = (value - target) / target;
+                    n += 1;
+
+                    if n >= 1000 {
+                        return Err(String::from_str("Failed to converge on c200!").unwrap());
+                    }
+                }
+                Ok(c200)
+            }
         }
     }
 
@@ -74,4 +106,21 @@ impl Halo {
             }
         }
     }
+}
+
+pub fn m200_c200_to_rs_rhos(m200: f64, c200: f64) -> (f64, f64) {
+    let mass_integral_factor = (1.0 + c200).ln() - (c200 / (1.0 + c200));
+    let rho_s = 200.0 * RHOCRIT * (c200.powi(3) / (3.0 * mass_integral_factor));
+    let geometric_factor = 4.0 * PI * c200.powi(3) / 3.0;
+    let r_s = (m200 / (geometric_factor * 200.0 * RHOCRIT)).cbrt();
+
+    (r_s, rho_s)
+}
+
+pub fn rs_rhos_to_m200_c200(r_s: f64, rho_s: f64) -> (f64, f64) {
+    let halo = Halo::NFW(rho_s, r_s);
+    let c200 = halo.c200().unwrap();
+    let m200 = halo.enclosed_mass(r_s * c200);
+
+    (m200, c200)
 }
