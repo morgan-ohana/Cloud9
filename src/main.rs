@@ -1,10 +1,10 @@
 use std::f64::consts::PI;
 
-use crate::halo::Halo;
+use crate::fitting::{find_parameters_gradient_descent, find_parameters_mcmc};
+use crate::halo::{Halo, m200_c200_to_rs_rhos};
 use crate::hydrostatics::{
     CM_IN_KPC, GG, KM_IN_KPC, isothermal_abg_background, isothermal_core_collapse_background,
 };
-use crate::fitting::{find_parameters_mcmc, find_parameters_gradient_descent};
 use crate::plotting::{create_corner_plot, plot_function};
 
 mod fitting;
@@ -49,19 +49,40 @@ fn main() {
         169116.20672504138,
     ];
 
-    let (params, chain, likelihoods) = find_parameters_mcmc(
-        &data,
-        //[1e8, 5.0, 0.5, 1e4], //bad guess
-        [2e7, 4.0, 0.2, 5e5],
-        None,
-        10000,
-        1000,
-    );
-    //let params = cdm_fit_params;
+    let mcmc: bool = true;
+    let params: [f64; 4];
 
-    check_chain_behavior(&chain);   
+    if mcmc {
+        let (m200_params, chain, likelihoods) = find_parameters_mcmc(
+            &data,
+            //[1e8, 5.0, 0.5,false//bad guess
+            [2e9, 10.0, 0.2, 5.5e4],
+            None,
+            10000,
+            1000,
+        );
 
-    create_corner_plot(&chain, &["rho_s_0", "r_s_0", "tau", "rho_c"], "corner_plot.png", 0.2).unwrap();
+        check_chain_behavior(&chain);
+
+        create_corner_plot(
+            &chain,
+            &["m200_0", "c200_0", "tau", "rho_c"],
+            "corner_plot.png",
+            0.2,
+        )
+        .unwrap();
+
+        params = {
+            let mut params = m200_params.clone();
+            let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+            params[0] = rho_s;
+            params[1] = r_s;
+            params
+        }
+    } else {
+        //let params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2, 5e5], None);
+        params = sidm_fit_params;
+    }
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -103,6 +124,8 @@ fn main() {
     .unwrap();
 
     let halo = Halo::NFW(params[0], params[1]);
+    let r200 = halo.r200().unwrap();
+    let m200 = halo.m200().unwrap();
     println!(
         "r200 = {}, m200 = {:.4e}, c200 = {} \ndeviation = {}",
         halo.r200().unwrap(),
@@ -116,14 +139,17 @@ fn check_chain_behavior(chain: &[[f64; 4]]) {
     for i in 0..4 {
         let values: Vec<f64> = chain.iter().map(|p| p[i]).collect();
         let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
-        let variance: f64 = values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let variance: f64 =
+            values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
         let std = variance.sqrt();
-        
+
         // Compare std to mean
         let relative_std = std / mean.abs();
-        println!("Param[{}]: mean = {:.6e}, std = {:.6e}, std/mean = {:.6e}", 
-            i, mean, std, relative_std);
-        
+        println!(
+            "Param[{}]: mean = {:.6e}, std = {:.6e}, std/mean = {:.6e}",
+            i, mean, std, relative_std
+        );
+
         // For a narrow peak, std/mean should be small but > 0
         if relative_std < 1e-6 {
             println!("Warning: Chain may be stuck, not mixing!");

@@ -36,7 +36,6 @@ impl Halo {
     pub fn r200(&self) -> Result<f64, String> {
         match self {
             Halo::NFW(_rho_s, r_s) => {
-                dbg!("I am law abidding code");
                 let c200 = self.c200()?;
                 Ok(c200 * r_s)
             }
@@ -65,8 +64,6 @@ impl Halo {
     }
 
     pub fn m200(&self) -> Result<f64, String> {
-        dbg!("HUUUHHH");
-        println!("HAAAAAAAH");
         Ok(self.enclosed_mass(self.r200()?))
     }
 
@@ -75,7 +72,7 @@ impl Halo {
             Halo::NFW(rho_s, _r_s) => {
                 let mut c200: f64 = 1.0; // initial guess, def wrong, right order of magnitude
                 let mut value = ((1.0 + c200).ln() - (c200 / (1.0 + c200))) / c200.powi(3);
-                let target = 3.0 * 200.0 * RHOCRIT / rho_s;
+                let target = (1.0 / 3.0) * 200.0 * RHOCRIT / rho_s;
                 let mut diff = (value - target) / target;
 
                 let mut n = 0;
@@ -87,9 +84,13 @@ impl Halo {
                     n += 1;
 
                     if n >= 1000 {
-                        return Err(String::from_str("Failed to converge on c200!").unwrap());
+                        return Err(format!(
+                            "Failed to converge on c200!\ndiff = {}, target = {}, value = {}",
+                            diff, target, value
+                        ));
                     }
                 }
+                dbg!(n);
                 Ok(c200)
             }
         }
@@ -123,4 +124,27 @@ pub fn rs_rhos_to_m200_c200(r_s: f64, rho_s: f64) -> (f64, f64) {
     let m200 = halo.enclosed_mass(r_s * c200);
 
     (m200, c200)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rs_rhos_to_m200_c200_conversion() {
+        let c200: f64 = rand::random_range(0.0..20.0);
+        let m200: f64 = (rand::random_range(7.0..15.0) as f64).exp();
+        dbg!((m200, c200));
+
+        let (rs, rhos) = m200_c200_to_rs_rhos(m200, c200);
+
+        let (new_m200, new_c200) = rs_rhos_to_m200_c200(rs, rhos);
+
+        let m200_err = (new_m200 - m200) / m200;
+        let c200_err = (new_c200 - c200) / c200;
+
+        if m200_err > 1e-4 || c200_err > 1e-4 {
+            panic!("m200 error: {m200_err:.5}, c200 error: {c200_err:.5}");
+        }
+    }
 }
