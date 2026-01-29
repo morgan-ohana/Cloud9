@@ -120,12 +120,78 @@ pub fn plot_function(
     Ok(())
 }
 
+pub fn create_chain_trace_plots(
+    chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
+    burn_in: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use plotters::prelude::*;
+
+    for (chain_id, (_, chain, _)) in chains.iter().enumerate() {
+        let filename = format!("chain_{}_trace.png", chain_id);
+        let root = BitMapBackend::new(&filename, (1200, 800)).into_drawing_area();
+        root.fill(&WHITE)?;
+
+        // Create subplots for each parameter
+        let sub_areas = root.split_evenly((2, 2));
+        let param_names = ["m200_0", "c200_0", "tau", "rho_c"];
+
+        for (param_idx, area) in sub_areas.into_iter().enumerate() {
+            if param_idx >= 4 {
+                break;
+            }
+
+            let data: Vec<f64> = chain.iter().map(|p| p[param_idx]).collect();
+
+            // Find reasonable y-range
+            let mut sorted: Vec<f64> = data.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p05 = sorted[(sorted.len() as f64 * 0.05) as usize];
+            let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];
+            let y_range = p05..p95;
+
+            let mut chart = ChartBuilder::on(&area)
+                .caption(
+                    format!("Chain {}: {}", chain_id, param_names[param_idx]),
+                    ("sans-serif", 16),
+                )
+                .margin(10)
+                .build_cartesian_2d(0..chain.len(), y_range)?;
+
+            chart
+                .configure_mesh()
+                .x_desc("Step")
+                .y_desc("Value")
+                .label_style(("sans-serif", 10))
+                .draw()?;
+
+            // Plot trace
+            chart.draw_series(LineSeries::new(
+                data.iter().enumerate().map(|(i, &v)| (i, v)),
+                &BLUE,
+            ))?;
+
+            // Mark burn-in cutoff
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(burn_in, p05), (burn_in, p95)],
+                &RED,
+            )))?;
+        }
+
+        root.present()?;
+        println!("Saved trace plot: {}", filename);
+    }
+
+    Ok(())
+}
+
 const LABEL_WIDTH: u32 = 30;
+const LOG_SCALE: [bool; 4] = [true, false, false, true];
 pub fn create_corner_plot(
     chain: &[[f64; 4]],
     param_names: &[&str; 4],
     output_path: &str,
     burn_in_fraction: f64,
+    bounds: &[[f64; 2]; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Remove burn-in
     let burn_in = (chain.len() as f64 * burn_in_fraction) as usize;
@@ -154,7 +220,13 @@ pub fn create_corner_plot(
 
             if row == col {
                 // Diagonal: Histogram
-                plot_histogram(drawing_area, &params[row], param_names[row], (row, col))?;
+                plot_histogram(
+                    drawing_area,
+                    &params[row],
+                    param_names[row],
+                    (row, col),
+                    &bounds[row],
+                )?;
             } else if row > col {
                 // Lower triangle: 2D scatter/density
                 plot_2d_scatter(
@@ -163,6 +235,7 @@ pub fn create_corner_plot(
                     &params[row],
                     param_names,
                     (row, col),
+                    &bounds,
                 )?;
             } else {
                 // Upper triangle: Correlation/contour or leave empty
@@ -181,18 +254,50 @@ fn plot_histogram(
     data: &[f64],
     param_name: &str,
     (row, col): (usize, usize),
+    bounds: &[f64; 2],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Calculate bins
-    let min = data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max = data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min = bounds[0];
+    let max = bounds[1];
+    // let min = data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    // let max = data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     let n_bins = 50;
-    let bin_width = (max - min) / n_bins as f64;
+    let edges = {
+        match LOG_SCALE[row] {
+            true => {
+                let mut edges = vec![0.0; n_bins + 1];
+                for i in 0..n_bins + 1 {
+                    let t = (i as f64) / (n_bins as f64);
+                    edges[i] = (min.ln() + t * (max.ln() - min.ln())).exp();
+                }
+                edges
+            }
+            false => {
+                let mut edges = vec![0.0; n_bins + 1];
+                for i in 0..n_bins + 1 {
+                    let t = (i as f64) / (n_bins as f64);
+                    edges[i] = min + t * (max - min);
+                }
+                edges
+            }
+        }
+    };
+
+    let mut spacing = match LOG_SCALE[row] {
+        true => (max.ln() - min.ln()) / (n_bins as f64),
+        false => (max - min) / (n_bins as f64),
+    };
     let mut bins = vec![0; n_bins];
 
     for &value in data {
-        let bin_idx = ((value - min) / bin_width).floor() as usize;
-        let bin_idx = bin_idx.min(n_bins - 1);
+        if value >= max || value <= min {
+            continue;
+        }
+        let bin_idx = match LOG_SCALE[row] {
+            true => ((value.ln() - min.ln()) / spacing).floor() as usize,
+            false => ((value - min) / spacing).floor() as usize,
+        };
         bins[bin_idx] += 1;
     }
 
@@ -213,44 +318,81 @@ fn plot_histogram(
         chart_builder.margin_bottom(LABEL_WIDTH);
     }
 
-    let mut chart = chart_builder
-        //.caption(param_name, ("sans-serif", 15).into_font())
-        .build_cartesian_2d(min..max, 0.0..max_count * 1.1)?;
+    match LOG_SCALE[row] {
+        true => {
+            let mut chart = chart_builder
+                //.caption(param_name, ("sans-serif", 15).into_font())
+                .build_cartesian_2d((min..max).log_scale(), 0.0..max_count * 1.1)?;
 
-    chart
-        .configure_mesh()
-        .x_desc(param_name) // X-axis label
-        .y_desc("Counts") // Y-axis label
-        .x_label_formatter(&|x| {
-            if x.abs() >= 1000.0 || x.abs() <= 0.1 {
-                format!("{:.1e}", x)
-            } else {
-                format!("{:.1}", x)
+            chart
+                .configure_mesh()
+                .x_desc(param_name) // X-axis label
+                .y_desc("Counts") // Y-axis label
+                .x_label_formatter(&|x| {
+                    if x.abs() >= 1000.0 || x.abs() <= 0.1 {
+                        format!("{:.1e}", x)
+                    } else {
+                        format!("{:.1}", x)
+                    }
+                })
+                .y_label_formatter(&|y| {
+                    if y.abs() >= 1000.0 || y.abs() <= 0.1 {
+                        format!("{:.1e}", y)
+                    } else {
+                        format!("{:.1}", y)
+                    }
+                })
+                .draw()?;
+
+            // Plot histogram bars
+            for i in 0..n_bins {
+                let count = bins[i] as f64;
+
+                chart.draw_series(std::iter::once(Rectangle::new(
+                    [(edges[i], 0.0), (edges[i + 1], count)],
+                    BLUE.mix(0.5).filled(),
+                )))?;
             }
-        })
-        .y_label_formatter(&|y| {
-            if y.abs() >= 1000.0 || y.abs() <= 0.1 {
-                format!("{:.1e}", y)
-            } else {
-                format!("{:.1}", y)
+        }
+        false => {
+            let mut chart = chart_builder
+                //.caption(param_name, ("sans-serif", 15).into_font())
+                .build_cartesian_2d(min..max, 0.0..max_count * 1.1)?;
+
+            chart
+                .configure_mesh()
+                .x_desc(param_name) // X-axis label
+                .y_desc("Counts") // Y-axis label
+                .x_label_formatter(&|x| {
+                    if x.abs() >= 1000.0 || x.abs() <= 0.1 {
+                        format!("{:.1e}", x)
+                    } else {
+                        format!("{:.1}", x)
+                    }
+                })
+                .y_label_formatter(&|y| {
+                    if y.abs() >= 1000.0 || y.abs() <= 0.1 {
+                        format!("{:.1e}", y)
+                    } else {
+                        format!("{:.1}", y)
+                    }
+                })
+                .draw()?;
+
+            // Plot histogram bars
+            for i in 0..n_bins {
+                let count = bins[i] as f64;
+
+                chart.draw_series(std::iter::once(Rectangle::new(
+                    [(edges[i], 0.0), (edges[i + 1], count)],
+                    BLUE.mix(0.5).filled(),
+                )))?;
             }
-        })
-        .draw()?;
-
-    // Plot histogram bars
-    for i in 0..n_bins {
-        let x_start = min + i as f64 * bin_width;
-        let x_end = x_start + bin_width;
-        let count = bins[i] as f64;
-
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(x_start, 0.0), (x_end, count)],
-            BLUE.mix(0.5).filled(),
-        )))?;
-    }
+        }
+    };
 
     // Add KDE curve
-    plot_kde(area, data, min, max)?;
+    plot_kde(area, data, min, max, LOG_SCALE[row])?;
 
     Ok(())
 }
@@ -261,16 +403,19 @@ fn plot_2d_scatter(
     y_data: &[f64],
     param_names: &[&str; 4],
     (row, col): (usize, usize),
+    bounds: &[[f64; 2]; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Thin the data if too many points
     let thin_factor = (x_data.len() / 5000).max(1);
     let thinned_x: Vec<f64> = x_data.iter().step_by(thin_factor).copied().collect();
     let thinned_y: Vec<f64> = y_data.iter().step_by(thin_factor).copied().collect();
 
-    let x_min = thinned_x.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let x_max = thinned_x.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let y_min = thinned_y.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let y_max = thinned_y.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let [x_min, x_max] = bounds[col];
+    let [y_min, y_max] = bounds[row];
+    // let x_min = thinned_x.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    // let x_max = thinned_x.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    // let y_min = thinned_y.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    // let y_max = thinned_y.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     let mut chart_builder = ChartBuilder::on(area);
 
@@ -348,22 +493,32 @@ fn plot_kde(
     data: &[f64],
     min: f64,
     max: f64,
+    log_scale: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Simple KDE using Gaussian kernel
-    let bandwidth = (max - min) / 50.0;
+    let bandwidth = match log_scale {
+        true => (max.ln() - min.ln()) / 50.0,
+        false => (max - min) / 50.0,
+    };
     let n_points = 200;
 
     let mut kde_points = Vec::new();
     for i in 0..n_points {
-        let x = min + (max - min) * i as f64 / n_points as f64;
+        let x = match log_scale {
+            true => (min.ln() + (max.ln() - min.ln()) * i as f64 / n_points as f64).exp(),
+            false => min + (max - min) * i as f64 / n_points as f64,
+        };
 
         let mut density = 0.0;
         for &point in data {
-            let diff = (x - point) / bandwidth;
+            let diff = match log_scale {
+                true => (x.ln() - point.ln()) / bandwidth,
+                false => (x - point) / bandwidth,
+            };
             density += (-0.5 * diff * diff).exp();
         }
 
-        density /= (data.len() as f64 * bandwidth * (2.0 * std::f64::consts::PI).sqrt());
+        density /= data.len() as f64 * bandwidth * (2.0 * std::f64::consts::PI).sqrt();
         kde_points.push((x, density));
     }
 
@@ -372,22 +527,32 @@ fn plot_kde(
         .iter()
         .map(|&(_, d)| d)
         .fold(f64::NEG_INFINITY, f64::max);
-    let scale_factor = {
-        let mut hist_area = area.clone();
-        let hist_chart = ChartBuilder::on(&mut hist_area).build_cartesian_2d(min..max, 0.0..1.0)?;
-        let y_scale = 1.0 / max_density;
-        y_scale
-    };
+    let scale_factor = 1.0 / (1.1 * max_density);
 
-    let mut chart = ChartBuilder::on(area)
-        .margin_left(LABEL_WIDTH)
-        .margin_bottom(LABEL_WIDTH)
-        .build_cartesian_2d(min..max, 0.0..max_density * scale_factor)?;
+    match log_scale {
+        true => {
+            let mut chart = ChartBuilder::on(area)
+                .margin_left(LABEL_WIDTH)
+                .margin_bottom(LABEL_WIDTH)
+                .build_cartesian_2d((min..max).log_scale(), 0.0..1.0)?;
 
-    chart.draw_series(LineSeries::new(
-        kde_points.iter().map(|&(x, d)| (x, d * scale_factor)),
-        &RED,
-    ))?;
+            chart.draw_series(LineSeries::new(
+                kde_points.iter().map(|&(x, d)| (x, d * scale_factor)),
+                &RED,
+            ))?;
+        }
+        false => {
+            let mut chart = ChartBuilder::on(area)
+                .margin_left(LABEL_WIDTH)
+                .margin_bottom(LABEL_WIDTH)
+                .build_cartesian_2d(min..max, 0.0..1.0)?;
+
+            chart.draw_series(LineSeries::new(
+                kde_points.iter().map(|&(x, d)| (x, d * scale_factor)),
+                &RED,
+            ))?;
+        }
+    }
 
     Ok(())
 }

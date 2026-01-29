@@ -1,15 +1,197 @@
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
+use rand_pcg::Pcg64;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::halo::m200_c200_to_rs_rhos;
+use crate::plotting::create_chain_trace_plots;
 use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_function};
 
 pub fn find_parameters_mcmc(
+    data: &Vec<(f64, f64)>,
+    initial_guess: [f64; 4],
+    fix_tau: Option<f64>,
+    num_steps: usize,
+    burn_in: usize,
+    num_chains: usize,
+) -> Result<([f64; 4], Vec<[f64; 4]>, Vec<f64>), Box<dyn std::error::Error>> {
+    // Run parallel chains
+    let (chains, overall_best) =
+        find_parameters_mcmc_parallel(data, initial_guess, fix_tau, num_steps, burn_in, num_chains);
+
+    // Combine chains for analysis
+    let (combined_chain, combined_likelihoods) = combine_chains(&chains, burn_in);
+
+    // Check convergence
+    let r_hat = calculate_gelman_rubin(&chains, burn_in);
+    let converged = r_hat.iter().all(|&r| r < 1.1);
+
+    if !converged {
+        println!("Warning: Chains may not have converged (R-hat > 1.1)");
+        println!("Consider running more steps or tuning step sizes.");
+    } else {
+        println!("Chains appear to have converged (R-hat < 1.1)");
+    }
+
+    // Create trace plots for each chain
+    create_chain_trace_plots(&chains, burn_in)?;
+
+    Ok((overall_best, combined_chain, combined_likelihoods))
+}
+
+pub fn combine_chains(
+    chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
+    burn_in: usize,
+) -> (Vec<[f64; 4]>, Vec<f64>) {
+    let mut combined_chain = Vec::new();
+    let mut combined_likelihoods = Vec::new();
+
+    for (_, chain, likelihoods) in chains {
+        combined_chain.extend_from_slice(&chain[burn_in..]);
+        combined_likelihoods.extend_from_slice(&likelihoods[burn_in..]);
+    }
+
+    (combined_chain, combined_likelihoods)
+}
+
+fn find_parameters_mcmc_parallel(
+    data: &Vec<(f64, f64)>,
+    initial_guess: [f64; 4],
+    fix_tau: Option<f64>,
+    num_steps: usize,
+    burn_in: usize,
+    num_chains: usize,
+) -> (Vec<([f64; 4], Vec<[f64; 4]>, Vec<f64>)>, [f64; 4]) {
+    println!("Running {} parallel MCMC chains...", num_chains);
+
+    // Create a counter for progress reporting (optional)
+    let progress_counter = AtomicUsize::new(0);
+
+    // Run chains in parallel
+    let chains: Vec<([f64; 4], Vec<[f64; 4]>, Vec<f64>)> = (0..num_chains)
+        .into_par_iter()
+        .map(|chain_id| {
+            // Create a unique seed for each chain
+            let seed = 42 + chain_id as u64 * 12345;
+            let mut rng = Pcg64::seed_from_u64(seed);
+
+            // Perturb initial guess slightly for each chain
+            let mut chain_initial_guess = initial_guess;
+            for i in 0..4 {
+                if fix_tau.is_none() || i != 2 {
+                    // Add 10% random perturbation
+                    chain_initial_guess[i] *= 1.0 + 0.1 * (rng.random::<f64>() - 0.5);
+                }
+            }
+
+            // Run single chain
+            let (best_params, chain, likelihoods) = run_single_chain(
+                data,
+                chain_initial_guess,
+                fix_tau,
+                num_steps,
+                burn_in,
+                &mut rng,
+                chain_id,
+            );
+
+            // Update progress
+            let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            println!(
+                "Chain {} completed. Progress: {}/{}",
+                chain_id, completed, num_chains
+            );
+
+            (best_params, chain, likelihoods)
+        })
+        .collect();
+
+    // Find overall best parameters (from all chains)
+    let overall_best = find_overall_best(&chains);
+
+    // Calculate Gelman-Rubin convergence diagnostic
+    let r_hat = calculate_gelman_rubin(&chains, burn_in);
+    println!("Gelman-Rubin R-hat statistics: {:?}", r_hat);
+
+    (chains, overall_best)
+}
+
+fn find_overall_best(chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)]) -> [f64; 4] {
+    let mut best_log_likelihood = f64::NEG_INFINITY;
+    let mut best_params = [0.0; 4];
+
+    for (params, _, likelihoods) in chains {
+        if let Some(max_likelihood) = likelihoods.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
+            let log_likelihood = max_likelihood.ln();
+            if log_likelihood > best_log_likelihood {
+                best_log_likelihood = log_likelihood;
+                best_params = *params;
+            }
+        }
+    }
+
+    best_params
+}
+
+fn calculate_gelman_rubin(
+    chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
+    burn_in: usize,
+) -> [f64; 4] {
+    let m = chains.len() as f64;
+    let n = (chains[0].1.len() - burn_in) as f64; // Samples per chain after burn-in
+
+    let mut r_hat = [0.0; 4];
+
+    for param_idx in 0..4 {
+        // Collect samples for this parameter
+        let mut param_samples = Vec::new();
+        for (_, chain, _) in chains {
+            let chain_samples: Vec<f64> = chain[burn_in..].iter().map(|p| p[param_idx]).collect();
+            param_samples.push(chain_samples);
+        }
+
+        // Calculate within-chain variance
+        let mut chain_means = Vec::new();
+        let mut within_var = 0.0;
+
+        for samples in &param_samples {
+            let mean: f64 = samples.iter().sum::<f64>() / n;
+            chain_means.push(mean);
+
+            let variance: f64 =
+                samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            within_var += variance;
+        }
+        within_var /= m;
+
+        // Calculate between-chain variance
+        let overall_mean: f64 = chain_means.iter().sum::<f64>() / m;
+        let between_var: f64 = chain_means
+            .iter()
+            .map(|&mean| (mean - overall_mean).powi(2))
+            .sum::<f64>()
+            / (m - 1.0);
+        let between_var = between_var * n;
+
+        // Calculate pooled variance
+        let pooled_var = ((n - 1.0) / n) * within_var + (1.0 / n) * between_var;
+
+        // R-hat statistic (should approach 1.0 as chains converge)
+        r_hat[param_idx] = (pooled_var / within_var).sqrt();
+    }
+
+    r_hat
+}
+
+fn run_single_chain(
     data: &Vec<(f64, f64)>,
     initial_guess: [f64; 4], // m200, c200, tau, rho_c
     fix_tau: Option<f64>,
     num_steps: usize,
     burn_in: usize,
+    rng: &mut impl Rng,
+    chain_id: usize,
 ) -> ([f64; 4], Vec<[f64; 4]>, Vec<f64>) {
     let mut current_params = initial_guess;
     let mut current_log_likelihood = log_likelihood(current_params, data);
@@ -17,9 +199,6 @@ pub fn find_parameters_mcmc(
     let mut accepted = 0;
     let mut chain = Vec::with_capacity(num_steps);
     let mut likelihoods = Vec::with_capacity(num_steps);
-
-    // Normal distributions for proposals (centered at current values)
-    let mut rng = rand::rng();
 
     let mut relative_step_size = 0.01;
     for step in 0..num_steps {
@@ -37,7 +216,7 @@ pub fn find_parameters_mcmc(
                 relative_step_size * current_params[i].abs(),
             )
             .unwrap();
-            proposed_params[i] = normal.sample(&mut rng);
+            proposed_params[i] = normal.sample(rng);
 
             // Ensure parameters stay positive if needed
             if proposed_params[i] < 0.0 {
@@ -77,7 +256,8 @@ pub fn find_parameters_mcmc(
         // Optional: Print progress
         if step % 1000 == 0 {
             println!(
-                "Step {}/{}: Accepted rate: {:.2}%, LogLik: {:.4}, RelStep: {:.4}",
+                "Chain {}: Step {}/{}: Accepted rate: {:.2}%, LogLik: {:.4}, RelStep: {:.4}",
+                chain_id,
                 step,
                 num_steps,
                 (accepted as f64 / (step + 1) as f64) * 100.0,
@@ -86,10 +266,6 @@ pub fn find_parameters_mcmc(
             );
         }
     }
-
-    // Calculate final acceptance rate
-    let acceptance_rate = accepted as f64 / num_steps as f64;
-    println!("Final acceptance rate: {:.2}%", acceptance_rate * 100.0);
 
     // Find best parameters (maximum likelihood)
     let best_idx = likelihoods
@@ -101,8 +277,12 @@ pub fn find_parameters_mcmc(
 
     let best_params = chain[best_idx];
 
-    // Optional: Calculate parameter statistics
-    calculate_statistics(&chain, &best_params);
+    println!(
+        "Chain {} finished: Acceptance: {:.1}%, Best log-likelyhood: {:.4}",
+        chain_id,
+        (accepted as f64 / num_steps as f64) * 100.0,
+        likelihoods[best_idx].ln()
+    );
 
     (best_params, chain, likelihoods)
 }
@@ -225,7 +405,7 @@ fn get_rms_err_of_fit(
     error.sqrt()
 }
 
-fn calculate_statistics(chain: &[[f64; 4]], best_params: &[f64; 4]) {
+pub fn calculate_statistics(chain: &Vec<[f64; 4]>, best_params: &[f64; 4]) {
     let n = chain.len() as f64;
 
     println!("\nParameter Statistics:");

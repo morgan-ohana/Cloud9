@@ -1,15 +1,19 @@
 use std::f64::consts::PI;
 
-use crate::fitting::{find_parameters_gradient_descent, find_parameters_mcmc};
+use crate::fitting::{
+    calculate_statistics, find_parameters_gradient_descent, find_parameters_mcmc,
+};
 use crate::halo::{Halo, m200_c200_to_rs_rhos};
 use crate::hydrostatics::{
     CM_IN_KPC, GG, KM_IN_KPC, isothermal_abg_background, isothermal_core_collapse_background,
 };
+use crate::logging::{load_file, save_output};
 use crate::plotting::{create_corner_plot, plot_function};
 
 mod fitting;
 mod halo;
 mod hydrostatics;
+mod logging;
 mod plotting;
 
 const S_IN_GYR: f64 = 3.154e16;
@@ -50,17 +54,42 @@ fn main() {
     ];
 
     let mcmc: bool = true;
+    let premade: Option<String> = Some(String::from("32_x_10k.mcmc"));
     let params: [f64; 4];
 
     if mcmc {
-        let (m200_params, chain, likelihoods) = find_parameters_mcmc(
-            &data,
-            //[1e8, 5.0, 0.5,false//bad guess
-            [2e9, 10.0, 0.2, 5.5e4],
-            None,
-            10000,
-            1000,
-        );
+        let (m200_params, chain, likelihoods): ([f64; 4], Vec<[f64; 4]>, Vec<f64>);
+        let steps = 10000;
+        let burn_in = 1000;
+        if let Some(filename) = premade {
+            let mcmc_output = load_file(filename).unwrap();
+            m200_params = mcmc_output.best_params;
+            chain = mcmc_output.chain;
+            likelihoods = mcmc_output.likelihoods;
+        } else {
+            (m200_params, chain, likelihoods) = find_parameters_mcmc(
+                &data,
+                //[1e8, 5.0, 0.5,false//bad guess
+                [2e9, 10.0, 0.2, 5.5e4],
+                None,
+                steps,
+                burn_in,
+                32,
+            )
+            .unwrap();
+
+            save_output(
+                format!("32_x_{}k.mcmc", steps / 1000),
+                m200_params,
+                chain.clone(),
+                likelihoods,
+            )
+            .unwrap();
+        }
+
+        calculate_statistics(&chain, &m200_params);
+
+        let bounds = [[1e7, 1e11], [0.0, 20.0], [0.0, 1.0], [1e2, 1e6]];
 
         check_chain_behavior(&chain);
 
@@ -68,7 +97,8 @@ fn main() {
             &chain,
             &["m200_0", "c200_0", "tau", "rho_c"],
             "corner_plot.png",
-            0.2,
+            (burn_in as f64) / (steps as f64),
+            &bounds,
         )
         .unwrap();
 
