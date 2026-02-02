@@ -1,4 +1,5 @@
 use plotters::coord::Shift;
+use plotters::coord::ranged1d::ValueFormatter;
 use plotters::prelude::*;
 
 pub fn plot_function(
@@ -121,7 +122,7 @@ pub fn plot_function(
 }
 
 pub fn create_chain_trace_plots(
-    chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
+    chains: &[([f64; 3], Vec<[f64; 3]>, Vec<f64>)],
     burn_in: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use plotters::prelude::*;
@@ -132,11 +133,11 @@ pub fn create_chain_trace_plots(
         root.fill(&WHITE)?;
 
         // Create subplots for each parameter
-        let sub_areas = root.split_evenly((2, 2));
-        let param_names = ["m200_0", "c200_0", "tau", "rho_c"];
+        let sub_areas = root.split_evenly((1, 3));
+        let param_names = ["m200_0", "c200_0", "tau"];
 
         for (param_idx, area) in sub_areas.into_iter().enumerate() {
-            if param_idx >= 4 {
+            if param_idx >= 3 {
                 break;
             }
 
@@ -185,22 +186,23 @@ pub fn create_chain_trace_plots(
 }
 
 const LABEL_WIDTH: u32 = 30;
-const LOG_SCALE: [bool; 4] = [true, false, false, true];
+const LOG_SCALE: [bool; 3] = [true, false, false];
 pub fn create_corner_plot(
-    chain: &[[f64; 4]],
-    param_names: &[&str; 4],
+    chain: &[[f64; 3]],
+    marked_points: &[&[f64; 3]],
+    param_names: &[&str; 3],
     output_path: &str,
     burn_in_fraction: f64,
-    bounds: &[[f64; 2]; 4],
+    bounds: &[[f64; 2]; 3],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Remove burn-in
     let burn_in = (chain.len() as f64 * burn_in_fraction) as usize;
     let chain = &chain[burn_in..];
 
     // Extract parameter columns
-    let mut params: Vec<Vec<f64>> = vec![Vec::new(); 4];
+    let mut params: Vec<Vec<f64>> = vec![Vec::new(); 3];
     for point in chain {
-        for i in 0..4 {
+        for i in 0..3 {
             params[i].push(point[i]);
         }
     }
@@ -210,25 +212,29 @@ pub fn create_corner_plot(
     root.fill(&WHITE)?;
 
     // Split into 4x4 subplots
-    let sub_areas = root.margin(5, 50, 50, 5).split_evenly((4, 4));
+    let sub_areas = root.margin(5, 50, 50, 5).split_evenly((3, 3));
 
     // Plot each cell
-    for row in 0..4 {
-        for col in 0..4 {
-            let idx = row * 4 + col;
+    for row in 0..3 {
+        for col in 0..3 {
+            let idx = row * 3 + col;
             let drawing_area = &sub_areas[idx];
 
             if row == col {
                 // Diagonal: Histogram
+                let marked_values: Vec<f64> = marked_points.iter().map(|p| p[row]).collect();
                 plot_histogram(
                     drawing_area,
                     &params[row],
                     param_names[row],
                     (row, col),
                     &bounds[row],
+                    &marked_values,
                 )?;
             } else if row > col {
                 // Lower triangle: 2D scatter/density
+                let marked_2d: Vec<(f64, f64)> =
+                    marked_points.iter().map(|p| (p[col], p[row])).collect();
                 plot_2d_scatter(
                     drawing_area,
                     &params[col],
@@ -236,6 +242,7 @@ pub fn create_corner_plot(
                     param_names,
                     (row, col),
                     &bounds,
+                    &marked_2d,
                 )?;
             } else {
                 // Upper triangle: Correlation/contour or leave empty
@@ -255,6 +262,7 @@ fn plot_histogram(
     param_name: &str,
     (row, col): (usize, usize),
     bounds: &[f64; 2],
+    marked_values: &[f64],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Calculate bins
     let min = bounds[0];
@@ -288,7 +296,7 @@ fn plot_histogram(
         true => (max.ln() - min.ln()) / (n_bins as f64),
         false => (max - min) / (n_bins as f64),
     };
-    let mut bins = vec![0; n_bins];
+    let mut bins: Vec<u32> = vec![0; n_bins];
 
     for &value in data {
         if value >= max || value <= min {
@@ -324,33 +332,15 @@ fn plot_histogram(
                 //.caption(param_name, ("sans-serif", 15).into_font())
                 .build_cartesian_2d((min..max).log_scale(), 0.0..max_count * 1.1)?;
 
-            chart
-                .configure_mesh()
-                .x_desc(param_name) // X-axis label
-                .y_desc("Counts") // Y-axis label
-                .x_label_formatter(&|x| {
-                    if x.abs() >= 1000.0 || x.abs() <= 0.1 {
-                        format!("{:.1e}", x)
-                    } else {
-                        format!("{:.1}", x)
-                    }
-                })
-                .y_label_formatter(&|y| {
-                    if y.abs() >= 1000.0 || y.abs() <= 0.1 {
-                        format!("{:.1e}", y)
-                    } else {
-                        format!("{:.1}", y)
-                    }
-                })
-                .draw()?;
+            draw_hist_content(&mut chart, param_name, &bins, &edges)?;
 
-            // Plot histogram bars
-            for i in 0..n_bins {
-                let count = bins[i] as f64;
-
-                chart.draw_series(std::iter::once(Rectangle::new(
-                    [(edges[i], 0.0), (edges[i + 1], count)],
-                    BLUE.mix(0.5).filled(),
+            // Draw marked values with different colors
+            let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
+            for (i, &marked_value) in marked_values.iter().enumerate() {
+                let color = colors[i % colors.len()];
+                chart.draw_series(std::iter::once(PathElement::new(
+                    vec![(marked_value, 0.0), (marked_value, max_count * 1.1)],
+                    color,
                 )))?;
             }
         }
@@ -359,33 +349,15 @@ fn plot_histogram(
                 //.caption(param_name, ("sans-serif", 15).into_font())
                 .build_cartesian_2d(min..max, 0.0..max_count * 1.1)?;
 
-            chart
-                .configure_mesh()
-                .x_desc(param_name) // X-axis label
-                .y_desc("Counts") // Y-axis label
-                .x_label_formatter(&|x| {
-                    if x.abs() >= 1000.0 || x.abs() <= 0.1 {
-                        format!("{:.1e}", x)
-                    } else {
-                        format!("{:.1}", x)
-                    }
-                })
-                .y_label_formatter(&|y| {
-                    if y.abs() >= 1000.0 || y.abs() <= 0.1 {
-                        format!("{:.1e}", y)
-                    } else {
-                        format!("{:.1}", y)
-                    }
-                })
-                .draw()?;
+            draw_hist_content(&mut chart, param_name, &bins, &edges)?;
 
-            // Plot histogram bars
-            for i in 0..n_bins {
-                let count = bins[i] as f64;
-
-                chart.draw_series(std::iter::once(Rectangle::new(
-                    [(edges[i], 0.0), (edges[i + 1], count)],
-                    BLUE.mix(0.5).filled(),
+            // Draw marked values with different colors
+            let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
+            for (i, &marked_value) in marked_values.iter().enumerate() {
+                let color = colors[i % colors.len()];
+                chart.draw_series(std::iter::once(PathElement::new(
+                    vec![(marked_value, 0.0), (marked_value, max_count * 1.1)],
+                    color,
                 )))?;
             }
         }
@@ -397,13 +369,56 @@ fn plot_histogram(
     Ok(())
 }
 
+fn draw_hist_content<
+    X: Ranged<ValueType = f64> + ValueFormatter<f64>,
+    Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
+>(
+    chart: &mut ChartContext<BitMapBackend, Cartesian2d<X, Y>>,
+    param_name: &str,
+    bins: &Vec<u32>,
+    edges: &Vec<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    chart
+        .configure_mesh()
+        .x_desc(param_name) // X-axis label
+        .y_desc("Counts") // Y-axis label
+        .x_label_formatter(&|x| {
+            if x.abs() >= 1000.0 || x.abs() <= 0.01 {
+                format!("{:.1e}", x)
+            } else {
+                format!("{:.1}", x)
+            }
+        })
+        .y_label_formatter(&|y| {
+            if y.abs() >= 1000.0 || y.abs() <= 0.01 {
+                format!("{:.1e}", y)
+            } else {
+                format!("{:.1}", y)
+            }
+        })
+        .draw()?;
+
+    // Plot histogram bars
+    for i in 0..bins.len() {
+        let count = bins[i] as f64;
+
+        chart.draw_series(std::iter::once(Rectangle::new(
+            [(edges[i], 0.0), (edges[i + 1], count)],
+            BLUE.mix(0.5).filled(),
+        )))?;
+    }
+
+    Ok(())
+}
+
 fn plot_2d_scatter(
     area: &DrawingArea<BitMapBackend, Shift>,
     x_data: &[f64],
     y_data: &[f64],
-    param_names: &[&str; 4],
+    param_names: &[&str; 3],
     (row, col): (usize, usize),
-    bounds: &[[f64; 2]; 4],
+    bounds: &[[f64; 2]; 3],
+    marked_points_2d: &[(f64, f64)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Thin the data if too many points
     let thin_factor = (x_data.len() / 5000).max(1);
@@ -431,21 +446,105 @@ fn plot_2d_scatter(
         chart_builder.margin_bottom(LABEL_WIDTH);
     }
 
-    let mut chart = chart_builder.build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+    match (LOG_SCALE[col], LOG_SCALE[row]) {
+        (true, true) => {
+            let mut chart = chart_builder
+                .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
+            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+
+            // Draw marked points with different colors
+            let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
+            for (i, &(marked_x, marked_y)) in marked_points_2d.iter().enumerate() {
+                let color = colors[i % colors.len()];
+                chart.draw_series(std::iter::once(Circle::new(
+                    (marked_x, marked_y),
+                    5,
+                    color.filled(),
+                )))?;
+            }
+        }
+        (true, false) => {
+            let mut chart =
+                chart_builder.build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
+
+            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+
+            // Draw marked points with different colors
+            let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
+            for (i, &(marked_x, marked_y)) in marked_points_2d.iter().enumerate() {
+                let color = colors[i % colors.len()];
+                chart.draw_series(std::iter::once(Circle::new(
+                    (marked_x, marked_y),
+                    5,
+                    color.filled(),
+                )))?;
+            }
+        }
+        (false, true) => {
+            let mut chart =
+                chart_builder.build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
+
+            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+
+            // Draw marked points with different colors
+            let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
+            for (i, &(marked_x, marked_y)) in marked_points_2d.iter().enumerate() {
+                let color = colors[i % colors.len()];
+                chart.draw_series(std::iter::once(Circle::new(
+                    (marked_x, marked_y),
+                    5,
+                    color.filled(),
+                )))?;
+            }
+        }
+        (false, false) => {
+            let mut chart = chart_builder.build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+
+            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+
+            // Draw marked points with different colors
+            let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
+            for (i, &(marked_x, marked_y)) in marked_points_2d.iter().enumerate() {
+                let color = colors[i % colors.len()];
+                chart.draw_series(std::iter::once(Circle::new(
+                    (marked_x, marked_y),
+                    5,
+                    color.filled(),
+                )))?;
+            }
+        }
+    };
+
+    // Add contour lines for density
+    plot_2d_contours(area, x_data, y_data, x_min, x_max, y_min, y_max, (row, col))?;
+
+    Ok(())
+}
+
+fn draw_scatter_content<
+    X: Ranged<ValueType = f64> + ValueFormatter<f64>,
+    Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
+>(
+    chart: &mut ChartContext<BitMapBackend, Cartesian2d<X, Y>>,
+    thinned_x: &Vec<f64>,
+    thinned_y: &Vec<f64>,
+    param_names: &[&str; 3],
+    (row, col): (usize, usize),
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut mesh = chart.configure_mesh();
 
     mesh.x_desc(param_names[col]) // X-axis label
         .y_desc(param_names[row]) // Y-axis label
         .x_label_formatter(&|x| {
-            if x.abs() >= 1000.0 || x.abs() <= 0.1 {
+            if x.abs() >= 1000.0 || x.abs() <= 0.01 {
                 format!("{:.1e}", x)
             } else {
                 format!("{:.1}", x)
             }
         })
         .y_label_formatter(&|y| {
-            if y.abs() >= 1000.0 || y.abs() <= 0.1 {
+            if y.abs() >= 1000.0 || y.abs() <= 0.01 {
                 format!("{:.1e}", y)
             } else {
                 format!("{:.1}", y)
@@ -481,9 +580,6 @@ fn plot_2d_scatter(
             Circle::new((x, y), 1, color.mix(0.1).filled())
         },
     ))?;
-
-    // Add contour lines for density
-    plot_2d_contours(area, x_data, y_data, x_min, x_max, y_min, y_max)?;
 
     Ok(())
 }
@@ -565,17 +661,42 @@ fn plot_2d_contours(
     x_max: f64,
     y_min: f64,
     y_max: f64,
+    (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Simple 2D density estimation
     let grid_size = 50;
-    let x_bin_width = (x_max - x_min) / grid_size as f64;
-    let y_bin_width = (y_max - y_min) / grid_size as f64;
 
     let mut density = vec![vec![0.0; grid_size]; grid_size];
+    let mut edges = vec![vec![(0.0, 0.0); grid_size + 1]; grid_size + 1];
+    for i in 0..=grid_size {
+        for j in 0..=grid_size {
+            let x_edge = match LOG_SCALE[col] {
+                true => {
+                    (x_min.ln() + (x_max.ln() - x_min.ln()) * i as f64 / grid_size as f64).exp()
+                }
+                false => x_min + (x_max - x_min) * i as f64 / grid_size as f64,
+            };
+            let y_edge = match LOG_SCALE[row] {
+                true => {
+                    (y_min.ln() + (y_max.ln() - y_min.ln()) * j as f64 / grid_size as f64).exp()
+                }
+                false => y_min + (y_max - y_min) * j as f64 / grid_size as f64,
+            };
+            edges[i][j] = (x_edge, y_edge);
+        }
+    }
 
     for (&x, &y) in x_data.iter().zip(y_data.iter()) {
-        let x_bin = ((x - x_min) / x_bin_width).floor() as usize;
-        let y_bin = ((y - y_min) / y_bin_width).floor() as usize;
+        let x_bin = match LOG_SCALE[col] {
+            true => ((x.ln() - x_min.ln()) / (x_max.ln() - x_min.ln()) * grid_size as f64).floor()
+                as usize,
+            false => ((x - x_min) / (x_max - x_min) * grid_size as f64).floor() as usize,
+        };
+        let y_bin = match LOG_SCALE[row] {
+            true => ((y.ln() - y_min.ln()) / (y_max.ln() - y_min.ln()) * grid_size as f64).floor()
+                as usize,
+            false => ((y - y_min) / (y_max - y_min) * grid_size as f64).floor() as usize,
+        };
 
         if x_bin < grid_size && y_bin < grid_size {
             density[x_bin][y_bin] += 1.0;
@@ -589,48 +710,125 @@ fn plot_2d_contours(
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     if max_density > 0.0 {
-        let mut chart = ChartBuilder::on(area)
-            .margin_left(LABEL_WIDTH)
-            .margin_bottom(LABEL_WIDTH)
-            .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+        match (LOG_SCALE[col], LOG_SCALE[row]) {
+            (true, true) => {
+                let mut chart = ChartBuilder::on(area)
+                    .margin_left(LABEL_WIDTH)
+                    .margin_bottom(LABEL_WIDTH)
+                    .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-        // Draw contour lines at 10%, 30%, 50%, 70%, 90%
-        let contour_levels = [0.1, 0.3, 0.5, 0.7, 0.9];
+                draw_contour_content(
+                    &mut chart,
+                    &density,
+                    max_density,
+                    x_min,
+                    y_min,
+                    &edges,
+                    grid_size,
+                )?;
+            }
+            (true, false) => {
+                let mut chart = ChartBuilder::on(area)
+                    .margin_left(LABEL_WIDTH)
+                    .margin_bottom(LABEL_WIDTH)
+                    .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-        // Draw filled regions for each level
-        for level_idx in 0..contour_levels.len() {
-            let level = contour_levels[level_idx];
-            let next_level = if level_idx + 1 < contour_levels.len() {
-                contour_levels[level_idx + 1]
-            } else {
-                1.0
-            };
+                draw_contour_content(
+                    &mut chart,
+                    &density,
+                    max_density,
+                    x_min,
+                    y_min,
+                    &edges,
+                    grid_size,
+                )?;
+            }
+            (false, true) => {
+                let mut chart = ChartBuilder::on(area)
+                    .margin_left(LABEL_WIDTH)
+                    .margin_bottom(LABEL_WIDTH)
+                    .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-            // For each cell, if density is between current and next level, fill it
-            for i in 0..grid_size {
-                for j in 0..grid_size {
-                    let normalized_density = density[i][j] / max_density;
+                draw_contour_content(
+                    &mut chart,
+                    &density,
+                    max_density,
+                    x_min,
+                    y_min,
+                    &edges,
+                    grid_size,
+                )?;
+            }
+            (false, false) => {
+                let mut chart = ChartBuilder::on(area)
+                    .margin_left(LABEL_WIDTH)
+                    .margin_bottom(LABEL_WIDTH)
+                    .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-                    if normalized_density >= level && normalized_density < next_level {
-                        let x_start = x_min + i as f64 * x_bin_width;
-                        let x_end = x_start + x_bin_width;
-                        let y_start = y_min + j as f64 * y_bin_width;
-                        let y_end = y_start + y_bin_width;
+                draw_contour_content(
+                    &mut chart,
+                    &density,
+                    max_density,
+                    x_min,
+                    y_min,
+                    &edges,
+                    grid_size,
+                )?;
+            }
+        }
+    }
 
-                        // Different colors for different levels
-                        let color = match level_idx {
-                            0 => RGBColor(100, 100, 255), // Blue
-                            1 => RGBColor(100, 200, 255), // Light blue
-                            2 => RGBColor(100, 255, 200), // Cyan
-                            3 => RGBColor(255, 200, 100), // Orange
-                            _ => RGBColor(255, 100, 100), // Red
-                        };
+    Ok(())
+}
 
-                        chart.draw_series(std::iter::once(Rectangle::new(
-                            [(x_start, y_start), (x_end, y_end)],
-                            color.mix(0.3).filled(),
-                        )))?;
-                    }
+fn draw_contour_content(
+    chart: &mut ChartContext<
+        BitMapBackend,
+        Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
+    >,
+    density: &Vec<Vec<f64>>,
+    max_density: f64,
+    x_min: f64,
+    y_min: f64,
+    edges: &Vec<Vec<(f64, f64)>>,
+    grid_size: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Draw contour lines at 10%, 30%, 50%, 70%, 90%
+    let contour_levels = [0.1, 0.3, 0.5, 0.7, 0.9];
+
+    // Draw filled regions for each level
+    for level_idx in 0..contour_levels.len() {
+        let level = contour_levels[level_idx];
+        let next_level = if level_idx + 1 < contour_levels.len() {
+            contour_levels[level_idx + 1]
+        } else {
+            1.0
+        };
+
+        // For each cell, if density is between current and next level, fill it
+        for i in 0..grid_size {
+            for j in 0..grid_size {
+                let normalized_density = density[i][j] / max_density;
+
+                if normalized_density >= level && normalized_density < next_level {
+                    let x_start = edges[i][j].0;
+                    let x_end = edges[i + 1][j].0;
+                    let y_start = edges[i][j].1;
+                    let y_end = edges[i][j + 1].1;
+
+                    // Different colors for different levels
+                    let color = match level_idx {
+                        0 => RGBColor(100, 100, 255), // Blue
+                        1 => RGBColor(100, 200, 255), // Light blue
+                        2 => RGBColor(100, 255, 200), // Cyan
+                        3 => RGBColor(255, 200, 100), // Orange
+                        _ => RGBColor(255, 100, 100), // Red
+                    };
+
+                    chart.draw_series(std::iter::once(Rectangle::new(
+                        [(x_start, y_start), (x_end, y_end)],
+                        color.mix(0.3).filled(),
+                    )))?;
                 }
             }
         }
@@ -664,11 +862,21 @@ fn plot_correlation(
     // Display correlation coefficient
     let text = format!("ρ = {:.3}", correlation);
 
-    let mut chart = ChartBuilder::on(area).build_cartesian_2d(0.0..1.0, 0.0..1.0)?;
+    let mut chart = ChartBuilder::on(area)
+        .margin_left(LABEL_WIDTH)
+        .margin_bottom(LABEL_WIDTH)
+        .build_cartesian_2d(0.0..1.0, 0.0..1.0)?;
+
+    let label_fraction = LABEL_WIDTH as f64 / (area.dim_in_pixel().0 as f64);
+    let subplot_width = 1.0 - label_fraction;
+    let center_point = (
+        0.5 * subplot_width + label_fraction as f64,
+        0.5 * subplot_width + label_fraction as f64,
+    );
 
     chart.draw_series(std::iter::once(Text::new(
         text,
-        (0.5, 0.5),
+        center_point,
         ("sans-serif", 20).into_font(),
     )))?;
 

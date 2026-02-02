@@ -1,23 +1,20 @@
 use std::f64::consts::PI;
 
+use crate::constants::*;
 use crate::fitting::{
     calculate_statistics, find_parameters_gradient_descent, find_parameters_mcmc,
 };
-use crate::halo::{Halo, m200_c200_to_rs_rhos};
-use crate::hydrostatics::{
-    CM_IN_KPC, GG, KM_IN_KPC, isothermal_abg_background, isothermal_core_collapse_background,
-};
+use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
+use crate::hydrostatics::{isothermal_abg_background, isothermal_core_collapse_background};
 use crate::logging::{load_file, save_output};
 use crate::plotting::{create_corner_plot, plot_function};
 
+mod constants;
 mod fitting;
 mod halo;
 mod hydrostatics;
 mod logging;
 mod plotting;
-
-const S_IN_GYR: f64 = 3.154e16;
-const G_IN_MSUN: f64 = 1.988e33;
 
 fn main() {
     let data = vec![
@@ -43,23 +40,23 @@ fn main() {
         6282772.676310997,
         2.8897601910357062,
         0.18438405302532834,
-        54574.17044567845,
+        //54574.17044567845,
     ];
 
     let cdm_fit_params = [
         7585724.648997071,
         2.195234319751577,
         0.0,
-        169116.20672504138,
+        //169116.20672504138,
     ];
 
-    let mcmc: bool = true;
-    let premade: Option<String> = Some(String::from("32_x_10k.mcmc"));
-    let params: [f64; 4];
+    let mcmc: bool = false;
+    let premade: Option<String> = None; // Some(String::from("32_x_10k.mcmc"));
+    let params: [f64; 3];
 
     if mcmc {
-        let (m200_params, chain, likelihoods): ([f64; 4], Vec<[f64; 4]>, Vec<f64>);
-        let steps = 10000;
+        let (m200_params, chain, likelihoods): ([f64; 3], Vec<[f64; 3]>, Vec<f64>);
+        let steps = 20000;
         let burn_in = 1000;
         if let Some(filename) = premade {
             let mcmc_output = load_file(filename).unwrap();
@@ -70,7 +67,7 @@ fn main() {
             (m200_params, chain, likelihoods) = find_parameters_mcmc(
                 &data,
                 //[1e8, 5.0, 0.5,false//bad guess
-                [2e9, 10.0, 0.2, 5.5e4],
+                [2e9, 10.0, 0.2],
                 None,
                 steps,
                 burn_in,
@@ -87,15 +84,24 @@ fn main() {
             .unwrap();
         }
 
-        calculate_statistics(&chain, &m200_params);
+        let mean_params = calculate_statistics(&chain, &m200_params);
 
-        let bounds = [[1e7, 1e11], [0.0, 20.0], [0.0, 1.0], [1e2, 1e6]];
+        let bounds = [[1e7, 1e11], [0.0, 20.0], [0.0, 1.0]];
 
         check_chain_behavior(&chain);
 
+        let grad_descent_fit = {
+            let mut params = sidm_fit_params.clone();
+            let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
+            params[0] = m200;
+            params[1] = c200;
+            params
+        };
+
         create_corner_plot(
             &chain,
-            &["m200_0", "c200_0", "tau", "rho_c"],
+            &[&grad_descent_fit, &mean_params, &m200_params],
+            &["m200_0", "c200_0", "tau"],
             "corner_plot.png",
             (burn_in as f64) / (steps as f64),
             &bounds,
@@ -110,7 +116,9 @@ fn main() {
             params
         }
     } else {
-        //let params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2, 5e5], None);
+        plot_distribution();
+        panic!();
+        //params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2], None);
         params = sidm_fit_params;
     }
 
@@ -131,13 +139,12 @@ fn main() {
         params[1],
         params[2],
         (0.1 * data[0].0, 10.0 * data.last().unwrap().0),
-        params[3],
         false,
     );
 
     let legend_text = format!(
-        "rho_s_0: {:.4e}\nr_s_0: {:.4e}\ntau: {}\nrho_c: {:.4e}",
-        params[0], params[1], params[2], params[3]
+        "rho_s_0: {:.4e}\nr_s_0: {:.4e}\ntau: {}",
+        params[0], params[1], params[2]
     );
     println!("{}", &legend_text);
 
@@ -165,7 +172,7 @@ fn main() {
     );
 }
 
-fn check_chain_behavior(chain: &[[f64; 4]]) {
+fn check_chain_behavior(chain: &[[f64; 3]]) {
     for i in 0..4 {
         let values: Vec<f64> = chain.iter().map(|p| p[i]).collect();
         let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
@@ -191,11 +198,10 @@ fn check_chain_behavior(chain: &[[f64; 4]]) {
 
 fn plot_distribution() {
     let target_init_num_col_density = 1e19;
-    let target_init_col_density: f64 =
-        target_init_num_col_density * hydrostatics::M_PROTON * hydrostatics::CM_IN_KPC.powi(2);
+    let target_init_col_density: f64 = target_init_num_col_density * M_PROTON * CM_IN_KPC.powi(2);
     let temperature = 1e4;
-    let mut sound_speed_squared = temperature / (hydrostatics::MP_OVER_KB); // kpc^2 / s^2
-    sound_speed_squared *= hydrostatics::KM_IN_KPC.powi(2); // km^2 / s^2
+    let mut sound_speed_squared = temperature / (MP_OVER_KB); // kpc^2 / s^2
+    sound_speed_squared *= KM_IN_KPC.powi(2); // km^2 / s^2
 
     // r_s = c_s / sqrt(4pi G rho_c)
     // uniform sphere approx:
@@ -204,10 +210,8 @@ fn plot_distribution() {
     // Units: [rho_c] = M_sun kpc^-3 = [G * sigma^2 / c_s^2] = km^2 kpc M_sun^-1 s^-2 * M_sun^2 kpc^-4 * [c_s]^-2 = km^2 kpc^-3 M_sun s^-2 * [c_s]^-2
     // => [c_s^2] = km^2 kpc^-3 M_sun s^-2 / M_sun kpc^-3 = km^2 / s^2
 
-    let rho_center_approx =
-        PI * hydrostatics::GG * (target_init_col_density).powi(2) / sound_speed_squared;
-    let scale_radius =
-        sound_speed_squared.sqrt() / (4.0 * PI * hydrostatics::GG * rho_center_approx);
+    let rho_center_approx = PI * GG * (target_init_col_density).powi(2) / sound_speed_squared;
+    let scale_radius = sound_speed_squared.sqrt() / (4.0 * PI * GG * rho_center_approx);
     println!("Center rho set to: {rho_center_approx}");
 
     // isothermal_abg_background(
@@ -221,13 +225,17 @@ fn plot_distribution() {
     //     rho_center_approx,
     // );
 
+    let halo = Halo::NFW(3e7, 3.0);
+    dbg!(halo.r_crit());
+    dbg!(10.0 * scale_radius);
+    let r_max = halo.r_crit();
+
     isothermal_core_collapse_background(
         temperature,
         3e7,
         3.0,
         0.2,
-        (1e-1, 10.0 * scale_radius),
-        rho_center_approx,
+        (1e-1, r_max),
         true,
     );
 }

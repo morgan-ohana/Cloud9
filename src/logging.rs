@@ -4,8 +4,8 @@ use std::io::{BufReader, BufWriter, Read, Write};
 
 #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
 pub struct MCMCOutput {
-    pub best_params: [f64; 4],
-    pub chain: Vec<[f64; 4]>,
+    pub best_params: [f64; 3],
+    pub chain: Vec<[f64; 3]>,
     pub likelihoods: Vec<f64>,
 }
 
@@ -27,8 +27,8 @@ pub fn load_file(file_name: String) -> anyhow::Result<MCMCOutput> {
 
 pub fn save_output(
     file_name: String,
-    best_params: [f64; 4],
-    chain: Vec<[f64; 4]>,
+    best_params: [f64; 3],
+    chain: Vec<[f64; 3]>,
     likelihoods: Vec<f64>,
 ) -> anyhow::Result<()> {
     let output = MCMCOutput {

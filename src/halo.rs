@@ -1,15 +1,6 @@
 use std::{f64::consts::PI, str::FromStr};
 
-use crate::hydrostatics::GG;
-
-const _M_IN_KPC: f64 = 3.0857e19;
-const _KG_IN_MSUN: f64 = 1.989e30;
-
-const HH: f64 = 0.671; // normalization factor for hubble constant
-const HUBBLE: f64 = 0.0671; // hubble const km / s kpc
-const _RHOCRIT: f64 =
-    1.8791 * (HH * HH) * 1e-26 * (_M_IN_KPC * _M_IN_KPC * _M_IN_KPC) / _KG_IN_MSUN; // Halobos calculation, contains magic numbers I don't understand
-const RHOCRIT: f64 = 3.0 * (HUBBLE * HUBBLE) / (8.0 * PI * GG); // My calculation
+use crate::constants::*;
 
 pub enum Halo {
     NFW(f64, f64), //rho_s, r_s
@@ -29,6 +20,18 @@ impl Halo {
         match self {
             Halo::NFW(rho_s, r_s) => {
                 4.0 * PI * rho_s * r_s.powi(3) * (((r_s + r) / r_s).ln() - (r / (r_s + r)))
+            }
+        }
+    }
+
+    pub fn r_crit(&self) -> f64 {
+        match self {
+            Halo::NFW(rho_s, r_s) => {
+                // for c = rho_s / rho_crit
+                // solving r*(r_s + r)^2 = r_s^3 c
+                let c = rho_s / RHOCRIT;
+                let factor = (3.0 * 3.0_f64.sqrt() * (27.0 * r_s.powi(6) * c.powi(2) + 4.0 * r_s.powi(6) * c).sqrt() + 27.0 * r_s.powi(3) * c + 2.0 * r_s.powi(3)).cbrt();
+                ((factor/2.0_f64.cbrt()) + (2.0_f64.cbrt() * r_s.powi(2) / factor) - 2.0 * r_s) / 3.0
             }
         }
     }
@@ -146,5 +149,13 @@ mod tests {
         if m200_err > 1e-4 || c200_err > 1e-4 {
             panic!("m200 error: {m200_err:.5}, c200 error: {c200_err:.5}");
         }
+    }
+
+
+    #[test]
+    fn test_r_crit() {
+        let halo = Halo::NFW(240.0 * RHOCRIT, 4.2);
+        let r_crit = halo.r_crit();
+        assert!((r_crit - 23.3785).abs() < 1e-4);
     }
 }

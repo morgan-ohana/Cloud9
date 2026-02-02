@@ -1,17 +1,9 @@
 use std::f64::consts::PI;
 
+use crate::constants::*;
 use crate::plotting::plot_function;
 
 const SPACIAL_GRID_NUM: usize = 1000;
-pub const GG: f64 = 4.301e-6; // Newton constant km^2 kpc / Msun s^2
-pub const KM_IN_KPC: f64 = 3.086e16;
-pub const CM_IN_KPC: f64 = 3.086e21;
-//const K_B: f64 = 7.29e-93; // Boltzmanns constant Msun kpc^2 / s^2 K
-pub const MP_OVER_KB: f64 = 1.15349467e35 * MOLECULAR_WEIGHT; // Particle mass over boltzmann constant s^2 K / kpc^2
-pub const M_PROTON: f64 = 8.41e-58; // Proton mass in Msun
-pub const MOLECULAR_WEIGHT: f64 = 0.5;
-pub const DISTANCE:f64 = 5e3; // 5 MPC or 5000 KPC
-pub const ARC_MIN: f64 = PI / 10800.0;
 
 fn get_r_points(bounds: (f64, f64)) -> Vec<f64> {
     let mut r_points = Vec::with_capacity(SPACIAL_GRID_NUM);
@@ -103,42 +95,75 @@ fn get_column_density(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
 
 fn get_hydrostatic_profile(
     r_points: &Vec<f64>,
-    external_field: Vec<f64>,
+    dm_rho_points: Vec<f64>,
     temperature_points: Vec<f64>,
-    rho_center: f64,
 ) -> Vec<f64> {
-    let mut rho_points = Vec::with_capacity(r_points.len());
-    rho_points.push(rho_center);
-    rho_points.push(rho_center);
+    let mut gas_rho_points = vec![0.0; SPACIAL_GRID_NUM];
+    gas_rho_points[SPACIAL_GRID_NUM - 1] = RHO_IGM;
+    gas_rho_points[SPACIAL_GRID_NUM - 2] = RHO_IGM;
+    gas_rho_points[SPACIAL_GRID_NUM - 3] = RHO_IGM;
 
     // For hydrostatics f = 0 = -dP + f_grav dr + f_ext dr
     // We also know for an ideal gas P = rho KT/m so we have:
     // drho = (m/kT) * rho * (a_grav + a_ext) dr
+    //
+    // dP/dr = - G M_enc rho_g / r^2
+    // (r^2/rho_g) dP/dr = - G M_enc
+    // M_enc = 4pi ∫_0^r (rho) r'^2 dr' where rho = rho_dm + rho_gas    
+    // Differentiating we get the second order ODE:
+    // (2r/rho_g) dP/dr + (r^2/rho_g) d^2P/dr^2 - (r^2/rho_g^2)(dP/dr)(drho_g/dr) = -4piG rho r^2
+    // => d^2P/dr^2 = (dP/dr)(drho_g/dr)/rho_g - 2(dP/dr)/r - 4piG rho rho_g
+    // remembering P = rho_gas kT/m
+    // d^2rho_g/dr^2 = (drho_g/dr)^2/rho_g - 2(drho_g/dr)/r - (4piGm/kT)rho * rho_g
 
     // Units: rho in M_sun / kpc^3 => [P] = [rho KT/m] = M_sun/ kpc^3 * kpc^2 / s^2 = (M_sun kpc / s^2) / kpc^2
+    // [d^2rho_g/dr^2] = M_sun / kpc^5 and [rho^2] = M_sun^2 / kpc^6
+    // => [Gm/kT] = kpc / M_sun
+    // [G] = km^2 kpc / M_sun s^2 and [m/k] = s^2 K / kpc^2 and [T] = K
+    // => [Gm/kT] = km^2 / M_sun kpc = kpc / M_sun (km/kpc)^2
 
-    let mut enclosed_mass = 0.0;
-    for i in 2..r_points.len() {
-        let dr = r_points[i] - r_points[i - 1];
+    dbg!(r_points);
+    let mut dgas_rho_dr: f64 = 0.0;
+    for i in (1..SPACIAL_GRID_NUM - 3).rev() {
+        dbg!(i);
+        dbg!(r_points[i]);
+        let force_prefactor = {
+            let mut prefactor = 4.0 * PI * GG * MP_OVER_KB / temperature_points[i];
+            prefactor /= KM_IN_KPC * KM_IN_KPC; // kpc / M_sun
+            prefactor
+        };
 
-        // f_ext dr via trapezoid
-        let external_piece = dr * (external_field[i] + external_field[i - 1]) / 2.0;
+        let dr = r_points[i + 1] - r_points[i];
 
-        // enclosed mass
-        let vol = (4.0 * PI / 3.0) * (r_points[i - 1].powi(3) - r_points[i - 2].powi(3));
-        enclosed_mass += vol * (rho_points[i - 1] + rho_points[i - 2]) / 2.0;
-        let mut f_grav = -GG * enclosed_mass / r_points[i].powi(2); // [km^2 kpc / M_sun s^2] * Msun / kpc^2 = [km^2 / s^2] / kpc
-        f_grav /= KM_IN_KPC * KM_IN_KPC; // kpc / s^2
+        let d2gas_rho_dr2 = {
+            dbg!(dm_rho_points[i]);
+            let rho_g = gas_rho_points[i + 1];
+            let r = r_points[i];
+            let term_1 = dgas_rho_dr.powi(2) / rho_g;
+            dbg!(term_1);
+            let term_2 = -2.0 * dgas_rho_dr / r;
+            dbg!(term_2);
+            let rho = rho_g + dm_rho_points[i]; //gas_rho_points[i] does not exist yet, use one point higher
+            let term_3 = -1.0 * force_prefactor * rho * rho_g;
+            dbg!(term_3);
+            term_1 + term_2 + term_3
+        };
+        dbg!(d2gas_rho_dr2);
 
-        let thermo_prefactor =
-            ((MP_OVER_KB / temperature_points[i]) + (MP_OVER_KB / temperature_points[i - 1])) / 2.0;
-        let drho = thermo_prefactor * rho_points[i - 1] * (external_piece + f_grav * dr);
-        //dbg!(drho);
+        dgas_rho_dr -= d2gas_rho_dr2 * dr; // -= because we are integrating inwards
+        dbg!(dgas_rho_dr);
 
-        rho_points.push((rho_points.last().unwrap() + drho).max(0.0));
+        gas_rho_points[i] = gas_rho_points[i + 1] - dgas_rho_dr * dr; // - delta rho because integrating inwards
+        dbg!(gas_rho_points[i]);
+
+        if gas_rho_points[i] < 0.0 || !gas_rho_points[i].is_finite() {
+            panic!("FUCK");
+        }
     }
+    // idx 0 never reached in intergal, just flatten to remove rho(0)=0 point
+    gas_rho_points[0] = gas_rho_points[1];
 
-    rho_points
+    gas_rho_points
 }
 
 pub fn isothermal_abg_background(
@@ -149,7 +174,6 @@ pub fn isothermal_abg_background(
     rho_s: f64,
     r_s: f64,
     bounds: (f64, f64),
-    rho_center: f64,
 ) {
     let rho = |r: f64| -> f64 {
         rho_s / ((r / r_s).powf(gamma) * (1.0 + (r / r_s).powf(alpha)).powf((beta - gamma) / alpha))
@@ -159,12 +183,9 @@ pub fn isothermal_abg_background(
 
     let dark_matter_rho_points = get_rho_points(rho, &r_points);
 
-    let external_field = get_force_points(dark_matter_rho_points, &r_points);
-
     let temperature_points = vec![temp; r_points.len()];
 
-    let rho_points =
-        get_hydrostatic_profile(&r_points, external_field, temperature_points, rho_center);
+    let rho_points = get_hydrostatic_profile(&r_points, dark_matter_rho_points, temperature_points);
 
     let number_density = {
         let mut num_density = Vec::with_capacity(rho_points.len());
@@ -182,7 +203,7 @@ pub fn isothermal_abg_background(
         "r (kpc)",
         "n_H (num / kpc^3)",
         None,
-        None
+        None,
     )
     .unwrap();
 
@@ -211,7 +232,7 @@ pub fn isothermal_abg_background(
         "r (arcmin)",
         "n_H (num / cm^2)",
         None,
-        None
+        None,
     )
     .unwrap();
 }
@@ -222,29 +243,32 @@ pub fn isothermal_core_collapse_background(
     r_s_0: f64,
     collapse_progress: f64,
     bounds: (f64, f64),
-    rho_center: f64,
     plot: bool,
 ) -> (Vec<f64>, Vec<f64>) {
+    // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
+    let tau = collapse_progress;
+    let rho_s = rho_s_0
+        * (2.033 + 0.7381 * tau + 7.264 * tau.powi(5) - 12.73 * tau.powi(7)
+            + 9.915 * tau.powi(9)
+            + (1.0 - 2.033) * (tau + 0.001).ln() / (0.001_f64).ln());
+    let r_s = r_s_0
+        * (0.7178 - 0.1026 * tau + 0.2474 * tau.powi(2) - 0.4079 * tau.powi(3)
+            + (1.0 - 0.7178) * (tau + 0.001).ln() / (0.001_f64).ln());
+    let r_c = r_s_0
+        * (2.555 * tau.sqrt() - 3.632 * tau + 2.131 * tau.powi(2) - 1.415 * tau.powi(3)
+            + 0.4683 * tau.powi(4));
+    
     let rho = |r: f64| -> f64 {
-        // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
-        let tau = collapse_progress;
-        let rho_s = rho_s_0 * (2.033 + 0.7381*tau + 7.264*tau.powi(5) - 12.73*tau.powi(7) + 9.915*tau.powi(9) + (1.0 - 2.033)*(tau + 0.001).ln()/(0.001_f64).ln());
-        let r_s = r_s_0 * (0.7178 - 0.1026*tau + 0.2474*tau.powi(2) - 0.4079*tau.powi(3) + (1.0 - 0.7178)*(tau + 0.001).ln()/(0.001_f64).ln());
-        let r_c = r_s_0 * (2.555*tau.sqrt() - 3.632*tau + 2.131*tau.powi(2) - 1.415*tau.powi(3) + 0.4683*tau.powi(4));
-
-        rho_s / (((r.powi(4) + r_c.powi(4)).sqrt().sqrt()/r_s) * (1.0 + (r/r_s)).powi(2))
+        rho_s / (((r.powi(4) + r_c.powi(4)).sqrt().sqrt() / r_s) * (1.0 + (r / r_s)).powi(2))
     };
 
     let r_points = get_r_points(bounds);
 
     let dark_matter_rho_points = get_rho_points(rho, &r_points);
 
-    let external_field = get_force_points(dark_matter_rho_points, &r_points);
-
     let temperature_points = vec![temp; r_points.len()];
 
-    let rho_points =
-        get_hydrostatic_profile(&r_points, external_field, temperature_points, rho_center);
+    let rho_points = get_hydrostatic_profile(&r_points, dark_matter_rho_points, temperature_points);
 
     let number_density = {
         let mut num_density = Vec::with_capacity(rho_points.len());
@@ -263,11 +287,10 @@ pub fn isothermal_core_collapse_background(
             "r (kpc)",
             "n_H (num / kpc^3)",
             None,
-            None
+            None,
         )
         .unwrap();
     }
-    
 
     let column_density = {
         let mut col_dens = get_column_density(number_density, &r_points);
@@ -295,7 +318,7 @@ pub fn isothermal_core_collapse_background(
             "r (arcmin)",
             "n_H (num / cm^2)",
             None,
-            None
+            None,
         )
         .unwrap();
     }
@@ -334,7 +357,7 @@ mod tests {
         let rms_err: f64 = {
             let mut rms_err: f64 = 0.0;
             for i in 0..err.len() - 1 {
-                rms_err += err[i].powi(2) * (r_points[i+1] - r_points[i])
+                rms_err += err[i].powi(2) * (r_points[i + 1] - r_points[i])
             }
             rms_err /= r_points.last().unwrap();
             rms_err.sqrt()
@@ -342,11 +365,21 @@ mod tests {
 
         if rms_err > 0.01 || !rms_err.is_finite() {
             //dbg!(err);
-            plot_function(&r_points, &err, "column_err_check.png", "Column Density Error", "r (kpc)", "% err", None, None).unwrap();
+            plot_function(
+                &r_points,
+                &err,
+                "column_err_check.png",
+                "Column Density Error",
+                "r (kpc)",
+                "% err",
+                None,
+                None,
+            )
+            .unwrap();
             panic!("rms error too high! rms_err = {rms_err}")
         }
     }
-    
+
     #[test]
     fn test_column_density_lin() {
         let r_points = get_r_points((1e-3, 1e3));
@@ -355,10 +388,8 @@ mod tests {
         let column_density = get_column_density(rho_points, &r_points);
 
         let r_max = r_points.last().unwrap();
-        let analytic_column_density = get_rho_points(
-            |r: f64| 2.0 * (r_max.powi(2) - r.powi(2)).sqrt(),
-            &r_points,
-        );
+        let analytic_column_density =
+            get_rho_points(|r: f64| 2.0 * (r_max.powi(2) - r.powi(2)).sqrt(), &r_points);
 
         let err = {
             let mut err = Vec::with_capacity(r_points.len());
@@ -382,9 +413,18 @@ mod tests {
 
         if rms_err > 0.01 || !rms_err.is_finite() {
             //dbg!(err);
-            plot_function(&r_points, &err, "column_err_check2.png", "Column Density Error", "r (kpc)", "% err", None, None).unwrap();
+            plot_function(
+                &r_points,
+                &err,
+                "column_err_check2.png",
+                "Column Density Error",
+                "r (kpc)",
+                "% err",
+                None,
+                None,
+            )
+            .unwrap();
             panic!("rms error too high! rms_err = {rms_err}")
         }
     }
-
 }
