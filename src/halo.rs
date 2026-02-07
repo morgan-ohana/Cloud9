@@ -30,8 +30,14 @@ impl Halo {
                 // for c = rho_s / rho_crit
                 // solving r*(r_s + r)^2 = r_s^3 c
                 let c = rho_s / RHOCRIT;
-                let factor = (3.0 * 3.0_f64.sqrt() * (27.0 * r_s.powi(6) * c.powi(2) + 4.0 * r_s.powi(6) * c).sqrt() + 27.0 * r_s.powi(3) * c + 2.0 * r_s.powi(3)).cbrt();
-                ((factor/2.0_f64.cbrt()) + (2.0_f64.cbrt() * r_s.powi(2) / factor) - 2.0 * r_s) / 3.0
+                let factor = (3.0
+                    * 3.0_f64.sqrt()
+                    * (27.0 * r_s.powi(6) * c.powi(2) + 4.0 * r_s.powi(6) * c).sqrt()
+                    + 27.0 * r_s.powi(3) * c
+                    + 2.0 * r_s.powi(3))
+                .cbrt();
+                ((factor / 2.0_f64.cbrt()) + (2.0_f64.cbrt() * r_s.powi(2) / factor) - 2.0 * r_s)
+                    / 3.0
             }
         }
     }
@@ -93,7 +99,6 @@ impl Halo {
                         ));
                     }
                 }
-                dbg!(n);
                 Ok(c200)
             }
         }
@@ -150,7 +155,6 @@ mod tests {
             panic!("m200 error: {m200_err:.5}, c200 error: {c200_err:.5}");
         }
     }
-
 
     #[test]
     fn test_r_crit() {

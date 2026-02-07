@@ -1,3 +1,4 @@
+use core::num;
 use std::f64::consts::PI;
 
 use crate::constants::*;
@@ -6,7 +7,7 @@ use crate::fitting::{
 };
 use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
 use crate::hydrostatics::{isothermal_abg_background, isothermal_core_collapse_background};
-use crate::logging::{load_file, save_output};
+use crate::logging::{load_file, save_output, save_output_json};
 use crate::plotting::{create_corner_plot, plot_function};
 
 mod constants;
@@ -40,23 +41,25 @@ fn main() {
         6282772.676310997,
         2.8897601910357062,
         0.18438405302532834,
-        //54574.17044567845,
+        54574.17044567845,
     ];
 
     let cdm_fit_params = [
         7585724.648997071,
         2.195234319751577,
         0.0,
-        //169116.20672504138,
+        169116.20672504138,
     ];
 
-    let mcmc: bool = false;
-    let premade: Option<String> = None; // Some(String::from("32_x_10k.mcmc"));
-    let params: [f64; 3];
+    let mcmc: bool = true;
+    let inwards: bool = false;
+    let premade: Option<String> = Some(String::from("data/320_x_10k.mcmc"));
+    let params: [f64; 4];
 
     if mcmc {
-        let (m200_params, chain, likelihoods): ([f64; 3], Vec<[f64; 3]>, Vec<f64>);
-        let steps = 20000;
+        let (m200_params, chain, likelihoods): ([f64; 4], Vec<[f64; 4]>, Vec<f64>);
+        let num_chains = 320;
+        let steps = 10000;
         let burn_in = 1000;
         if let Some(filename) = premade {
             let mcmc_output = load_file(filename).unwrap();
@@ -67,28 +70,39 @@ fn main() {
             (m200_params, chain, likelihoods) = find_parameters_mcmc(
                 &data,
                 //[1e8, 5.0, 0.5,false//bad guess
-                [2e9, 10.0, 0.2],
+                [2e9, 10.0, 0.2, 5.5e4],
                 None,
                 steps,
                 burn_in,
-                32,
+                inwards,
+                num_chains,
             )
             .unwrap();
 
             save_output(
-                format!("32_x_{}k.mcmc", steps / 1000),
+                format!("data/{}_x_{}k.mcmc", num_chains, steps / 1000),
                 m200_params,
                 chain.clone(),
-                likelihoods,
+                likelihoods.clone(),
             )
             .unwrap();
+
+            save_output_json(
+                format!("data/{}_x_{}k.json", num_chains, steps / 1000),
+                m200_params,
+                chain.clone(),
+                likelihoods.clone(),
+            )
+            .unwrap();
+
+            
         }
 
         let mean_params = calculate_statistics(&chain, &m200_params);
 
-        let bounds = [[1e7, 1e11], [0.0, 20.0], [0.0, 1.0]];
+        let bounds = [[1e7, 1e11], [0.0, 20.0], [0.0, 1.0], [1e2, 1e6]];
 
-        check_chain_behavior(&chain);
+        check_chain_behavior(&chain, inwards);
 
         let grad_descent_fit = {
             let mut params = sidm_fit_params.clone();
@@ -101,9 +115,10 @@ fn main() {
         create_corner_plot(
             &chain,
             &[&grad_descent_fit, &mean_params, &m200_params],
-            &["m200_0", "c200_0", "tau"],
+            &["m200_0", "c200_0", "tau", "rho_c"],
             "corner_plot.png",
             (burn_in as f64) / (steps as f64),
+            inwards,
             &bounds,
         )
         .unwrap();
@@ -116,9 +131,7 @@ fn main() {
             params
         }
     } else {
-        plot_distribution();
-        panic!();
-        //params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2], None);
+        //params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2, 5e5], None);
         params = sidm_fit_params;
     }
 
@@ -133,13 +146,28 @@ fn main() {
 
     println!("sigma_m = {sigma_m} \nt_c = {t_c}");
 
+    let rho_c = match inwards {
+        true => None,
+        false => Some(params[3]),
+    };
+
     let fit = isothermal_core_collapse_background(
         1e4,
         params[0],
         params[1],
         params[2],
+        rho_c,
         (0.1 * data[0].0, 10.0 * data.last().unwrap().0),
         false,
+    );
+
+    let halo = Halo::NFW(params[0], params[1]);
+    println!(
+        "r200 = {}, m200 = {:.4e}, c200 = {} \ndeviation = {}",
+        halo.r200().unwrap(),
+        halo.m200().unwrap(),
+        halo.c200().unwrap(),
+        halo.deviation().unwrap()
     );
 
     let legend_text = format!(
@@ -159,21 +187,15 @@ fn main() {
         Some(&data),
     )
     .unwrap();
-
-    let halo = Halo::NFW(params[0], params[1]);
-    let r200 = halo.r200().unwrap();
-    let m200 = halo.m200().unwrap();
-    println!(
-        "r200 = {}, m200 = {:.4e}, c200 = {} \ndeviation = {}",
-        halo.r200().unwrap(),
-        halo.m200().unwrap(),
-        halo.c200().unwrap(),
-        halo.deviation().unwrap()
-    );
 }
 
-fn check_chain_behavior(chain: &[[f64; 3]]) {
-    for i in 0..4 {
+fn check_chain_behavior(chain: &[[f64; 4]], inwards: bool) {
+    let num_params = match inwards {
+        true => 3,
+        false => 4,
+    };
+
+    for i in 0..num_params {
         let values: Vec<f64> = chain.iter().map(|p| p[i]).collect();
         let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
         let variance: f64 =
@@ -199,7 +221,7 @@ fn check_chain_behavior(chain: &[[f64; 3]]) {
 fn plot_distribution() {
     let target_init_num_col_density = 1e19;
     let target_init_col_density: f64 = target_init_num_col_density * M_PROTON * CM_IN_KPC.powi(2);
-    let temperature = 1e4;
+    let temperature = UVB_TEMP;
     let mut sound_speed_squared = temperature / (MP_OVER_KB); // kpc^2 / s^2
     sound_speed_squared *= KM_IN_KPC.powi(2); // km^2 / s^2
 
@@ -235,6 +257,7 @@ fn plot_distribution() {
         3e7,
         3.0,
         0.2,
+        Some(rho_center_approx),
         (1e-1, r_max),
         true,
     );

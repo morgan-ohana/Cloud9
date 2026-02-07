@@ -3,9 +3,10 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 
 #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MCMCOutput {
-    pub best_params: [f64; 3],
-    pub chain: Vec<[f64; 3]>,
+    pub best_params: [f64; 4],
+    pub chain: Vec<[f64; 4]>,
     pub likelihoods: Vec<f64>,
 }
 
@@ -27,8 +28,8 @@ pub fn load_file(file_name: String) -> anyhow::Result<MCMCOutput> {
 
 pub fn save_output(
     file_name: String,
-    best_params: [f64; 3],
-    chain: Vec<[f64; 3]>,
+    best_params: [f64; 4],
+    chain: Vec<[f64; 4]>,
     likelihoods: Vec<f64>,
 ) -> anyhow::Result<()> {
     let output = MCMCOutput {
@@ -46,5 +47,28 @@ pub fn save_output(
     writer.write_all(&bytes)?;
 
     println!("Saved Initial Conditions at {file_name}");
+    Ok(())
+}
+
+pub fn save_output_json(
+    file_name: String,
+    best_params: [f64; 4],
+    chain: Vec<[f64; 4]>,
+    likelihoods: Vec<f64>,
+) -> anyhow::Result<()> {
+    let output = MCMCOutput {
+        best_params,
+        chain,
+        likelihoods,
+    };
+
+    let file = File::create(&file_name)?;
+    let writer = BufWriter::new(file);
+
+    // Serialize to JSON
+    serde_json::to_writer_pretty(writer, &output)
+        .map_err(|e| anyhow::anyhow!("JSON serialization failed: {}", e))?;
+
+    println!("Saved json data at {file_name}");
     Ok(())
 }

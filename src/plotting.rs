@@ -122,22 +122,22 @@ pub fn plot_function(
 }
 
 pub fn create_chain_trace_plots(
-    chains: &[([f64; 3], Vec<[f64; 3]>, Vec<f64>)],
+    chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
     burn_in: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use plotters::prelude::*;
 
     for (chain_id, (_, chain, _)) in chains.iter().enumerate() {
-        let filename = format!("chain_{}_trace.png", chain_id);
+        let filename = format!("trace_plots/chain_{}_trace.png", chain_id);
         let root = BitMapBackend::new(&filename, (1200, 800)).into_drawing_area();
         root.fill(&WHITE)?;
 
         // Create subplots for each parameter
-        let sub_areas = root.split_evenly((1, 3));
-        let param_names = ["m200_0", "c200_0", "tau"];
+        let sub_areas = root.split_evenly((2, 2));
+        let param_names = ["m200_0", "c200_0", "tau", "rho_c"];
 
         for (param_idx, area) in sub_areas.into_iter().enumerate() {
-            if param_idx >= 3 {
+            if param_idx >= 4 {
                 break;
             }
 
@@ -186,23 +186,30 @@ pub fn create_chain_trace_plots(
 }
 
 const LABEL_WIDTH: u32 = 30;
-const LOG_SCALE: [bool; 3] = [true, false, false];
+const Y_LABEL_PAD: u32 = 15;
+const LOG_SCALE: [bool; 4] = [true, false, false, true];
 pub fn create_corner_plot(
-    chain: &[[f64; 3]],
-    marked_points: &[&[f64; 3]],
-    param_names: &[&str; 3],
+    chain: &[[f64; 4]],
+    marked_points: &[&[f64; 4]],
+    param_names: &[&str; 4],
     output_path: &str,
     burn_in_fraction: f64,
-    bounds: &[[f64; 2]; 3],
+    inwards: bool,
+    bounds: &[[f64; 2]; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Remove burn-in
     let burn_in = (chain.len() as f64 * burn_in_fraction) as usize;
     let chain = &chain[burn_in..];
 
+    let num_params = match inwards {
+        true => 3,
+        false => 4,
+    };
+
     // Extract parameter columns
-    let mut params: Vec<Vec<f64>> = vec![Vec::new(); 3];
+    let mut params: Vec<Vec<f64>> = vec![Vec::new(); num_params];
     for point in chain {
-        for i in 0..3 {
+        for i in 0..num_params {
             params[i].push(point[i]);
         }
     }
@@ -211,13 +218,21 @@ pub fn create_corner_plot(
     let root = BitMapBackend::new(output_path, (1600, 1600)).into_drawing_area();
     root.fill(&WHITE)?;
 
+    let plot_width = 1600 - LABEL_WIDTH - 5;
+
+    let x_break_points = [plot_width/4 + Y_LABEL_PAD, plot_width/2 + Y_LABEL_PAD, 3*plot_width/4 + Y_LABEL_PAD];
+    let y_break_points = [plot_width/4, plot_width/2, 3*plot_width/4];
+
     // Split into 4x4 subplots
-    let sub_areas = root.margin(5, 50, 50, 5).split_evenly((3, 3));
+    let sub_areas = root
+        .margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5)
+        .split_by_breakpoints(x_break_points, y_break_points);
+        //.split_evenly((num_params, num_params));
 
     // Plot each cell
-    for row in 0..3 {
-        for col in 0..3 {
-            let idx = row * 3 + col;
+    for row in 0..num_params {
+        for col in 0..num_params {
+            let idx = row * num_params + col;
             let drawing_area = &sub_areas[idx];
 
             if row == col {
@@ -292,7 +307,7 @@ fn plot_histogram(
         }
     };
 
-    let mut spacing = match LOG_SCALE[row] {
+    let spacing = match LOG_SCALE[row] {
         true => (max.ln() - min.ln()) / (n_bins as f64),
         false => (max - min) / (n_bins as f64),
     };
@@ -315,7 +330,7 @@ fn plot_histogram(
     let mut chart_builder = ChartBuilder::on(area);
 
     if col == 0 {
-        chart_builder.y_label_area_size(LABEL_WIDTH);
+        chart_builder.y_label_area_size(LABEL_WIDTH + Y_LABEL_PAD);
     } else {
         chart_builder.margin_left(LABEL_WIDTH);
     }
@@ -364,7 +379,7 @@ fn plot_histogram(
     };
 
     // Add KDE curve
-    plot_kde(area, data, min, max, LOG_SCALE[row])?;
+    plot_kde(area, data, min, max, (row, col), LOG_SCALE[row])?;
 
     Ok(())
 }
@@ -415,9 +430,9 @@ fn plot_2d_scatter(
     area: &DrawingArea<BitMapBackend, Shift>,
     x_data: &[f64],
     y_data: &[f64],
-    param_names: &[&str; 3],
+    param_names: &[&str; 4],
     (row, col): (usize, usize),
-    bounds: &[[f64; 2]; 3],
+    bounds: &[[f64; 2]; 4],
     marked_points_2d: &[(f64, f64)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Thin the data if too many points
@@ -427,15 +442,11 @@ fn plot_2d_scatter(
 
     let [x_min, x_max] = bounds[col];
     let [y_min, y_max] = bounds[row];
-    // let x_min = thinned_x.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    // let x_max = thinned_x.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    // let y_min = thinned_y.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    // let y_max = thinned_y.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     let mut chart_builder = ChartBuilder::on(area);
 
     if col == 0 {
-        chart_builder.y_label_area_size(LABEL_WIDTH);
+        chart_builder.y_label_area_size(LABEL_WIDTH + Y_LABEL_PAD);
     } else {
         chart_builder.margin_left(LABEL_WIDTH);
     }
@@ -529,7 +540,7 @@ fn draw_scatter_content<
     chart: &mut ChartContext<BitMapBackend, Cartesian2d<X, Y>>,
     thinned_x: &Vec<f64>,
     thinned_y: &Vec<f64>,
-    param_names: &[&str; 3],
+    param_names: &[&str; 4],
     (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut mesh = chart.configure_mesh();
@@ -589,6 +600,7 @@ fn plot_kde(
     data: &[f64],
     min: f64,
     max: f64,
+    (row, col): (usize, usize),
     log_scale: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Simple KDE using Gaussian kernel
@@ -625,10 +637,15 @@ fn plot_kde(
         .fold(f64::NEG_INFINITY, f64::max);
     let scale_factor = 1.0 / (1.1 * max_density);
 
+    let y_margin_width = match col {
+        0 => LABEL_WIDTH + Y_LABEL_PAD,
+        _ => LABEL_WIDTH
+    };
+
     match log_scale {
         true => {
             let mut chart = ChartBuilder::on(area)
-                .margin_left(LABEL_WIDTH)
+                .margin_left(y_margin_width)
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d((min..max).log_scale(), 0.0..1.0)?;
 
@@ -639,7 +656,7 @@ fn plot_kde(
         }
         false => {
             let mut chart = ChartBuilder::on(area)
-                .margin_left(LABEL_WIDTH)
+                .margin_left(y_margin_width)
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d(min..max, 0.0..1.0)?;
 
@@ -687,6 +704,10 @@ fn plot_2d_contours(
     }
 
     for (&x, &y) in x_data.iter().zip(y_data.iter()) {
+        if x > x_max || x < x_min || y > y_max || y < y_min {
+            continue;
+        }
+
         let x_bin = match LOG_SCALE[col] {
             true => ((x.ln() - x_min.ln()) / (x_max.ln() - x_min.ln()) * grid_size as f64).floor()
                 as usize,
@@ -698,9 +719,7 @@ fn plot_2d_contours(
             false => ((y - y_min) / (y_max - y_min) * grid_size as f64).floor() as usize,
         };
 
-        if x_bin < grid_size && y_bin < grid_size {
-            density[x_bin][y_bin] += 1.0;
-        }
+        density[x_bin][y_bin] += 1.0;
     }
 
     // Normalize
@@ -709,71 +728,44 @@ fn plot_2d_contours(
         .flatten()
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
+    let y_margin_width = match col {
+        0 => LABEL_WIDTH + Y_LABEL_PAD,
+        _ => LABEL_WIDTH
+    };
+
     if max_density > 0.0 {
         match (LOG_SCALE[col], LOG_SCALE[row]) {
             (true, true) => {
                 let mut chart = ChartBuilder::on(area)
-                    .margin_left(LABEL_WIDTH)
+                    .margin_left(y_margin_width)
                     .margin_bottom(LABEL_WIDTH)
                     .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-                draw_contour_content(
-                    &mut chart,
-                    &density,
-                    max_density,
-                    x_min,
-                    y_min,
-                    &edges,
-                    grid_size,
-                )?;
+                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
             }
             (true, false) => {
                 let mut chart = ChartBuilder::on(area)
-                    .margin_left(LABEL_WIDTH)
+                    .margin_left(y_margin_width)
                     .margin_bottom(LABEL_WIDTH)
                     .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-                draw_contour_content(
-                    &mut chart,
-                    &density,
-                    max_density,
-                    x_min,
-                    y_min,
-                    &edges,
-                    grid_size,
-                )?;
+                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
             }
             (false, true) => {
                 let mut chart = ChartBuilder::on(area)
-                    .margin_left(LABEL_WIDTH)
+                    .margin_left(y_margin_width)
                     .margin_bottom(LABEL_WIDTH)
                     .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-                draw_contour_content(
-                    &mut chart,
-                    &density,
-                    max_density,
-                    x_min,
-                    y_min,
-                    &edges,
-                    grid_size,
-                )?;
+                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
             }
             (false, false) => {
                 let mut chart = ChartBuilder::on(area)
-                    .margin_left(LABEL_WIDTH)
+                    .margin_left(y_margin_width)
                     .margin_bottom(LABEL_WIDTH)
                     .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-                draw_contour_content(
-                    &mut chart,
-                    &density,
-                    max_density,
-                    x_min,
-                    y_min,
-                    &edges,
-                    grid_size,
-                )?;
+                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
             }
         }
     }
@@ -788,8 +780,6 @@ fn draw_contour_content(
     >,
     density: &Vec<Vec<f64>>,
     max_density: f64,
-    x_min: f64,
-    y_min: f64,
     edges: &Vec<Vec<(f64, f64)>>,
     grid_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {

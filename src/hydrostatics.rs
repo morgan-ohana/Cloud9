@@ -1,5 +1,6 @@
 use std::f64::consts::PI;
 
+use crate::Halo;
 use crate::constants::*;
 use crate::plotting::plot_function;
 
@@ -93,7 +94,62 @@ fn get_column_density(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
     sigma
 }
 
-fn get_hydrostatic_profile(
+fn get_hydrostatic_profile_outwards(
+    r_points: &Vec<f64>,
+
+    external_field: Vec<f64>,
+
+    temperature_points: Vec<f64>,
+
+    rho_center: f64,
+) -> Vec<f64> {
+    let mut rho_points = Vec::with_capacity(r_points.len());
+
+    rho_points.push(rho_center);
+
+    rho_points.push(rho_center);
+
+    // For hydrostatics f = 0 = -dP + f_grav dr + f_ext dr
+
+    // We also know for an ideal gas P = rho KT/m so we have:
+
+    // drho = (m/kT) * rho * (a_grav + a_ext) dr
+
+    // Units: rho in M_sun / kpc^3 => [P] = [rho KT/m] = M_sun/ kpc^3 * kpc^2 / s^2 = (M_sun kpc / s^2) / kpc^2
+
+    let mut enclosed_mass = 0.0;
+
+    for i in 2..r_points.len() {
+        let dr = r_points[i] - r_points[i - 1];
+
+        // f_ext dr via trapezoid
+
+        let external_piece = dr * (external_field[i] + external_field[i - 1]) / 2.0;
+
+        // enclosed mass
+
+        let vol = (4.0 * PI / 3.0) * (r_points[i - 1].powi(3) - r_points[i - 2].powi(3));
+
+        enclosed_mass += vol * (rho_points[i - 1] + rho_points[i - 2]) / 2.0;
+
+        let mut f_grav = -GG * enclosed_mass / r_points[i].powi(2); // [km^2 kpc / M_sun s^2] * Msun / kpc^2 = [km^2 / s^2] / kpc
+
+        f_grav /= KM_IN_KPC * KM_IN_KPC; // kpc / s^2
+
+        let thermo_prefactor =
+            ((MP_OVER_KB / temperature_points[i]) + (MP_OVER_KB / temperature_points[i - 1])) / 2.0;
+
+        let drho = thermo_prefactor * rho_points[i - 1] * (external_piece + f_grav * dr);
+
+        //dbg!(drho);
+
+        rho_points.push((rho_points.last().unwrap() + drho).max(0.0));
+    }
+
+    rho_points
+}
+
+fn get_hydrostatic_profile_inwards(
     r_points: &Vec<f64>,
     dm_rho_points: Vec<f64>,
     temperature_points: Vec<f64>,
@@ -109,7 +165,7 @@ fn get_hydrostatic_profile(
     //
     // dP/dr = - G M_enc rho_g / r^2
     // (r^2/rho_g) dP/dr = - G M_enc
-    // M_enc = 4pi ∫_0^r (rho) r'^2 dr' where rho = rho_dm + rho_gas    
+    // M_enc = 4pi ∫_0^r (rho) r'^2 dr' where rho = rho_dm + rho_gas
     // Differentiating we get the second order ODE:
     // (2r/rho_g) dP/dr + (r^2/rho_g) d^2P/dr^2 - (r^2/rho_g^2)(dP/dr)(drho_g/dr) = -4piG rho r^2
     // => d^2P/dr^2 = (dP/dr)(drho_g/dr)/rho_g - 2(dP/dr)/r - 4piG rho rho_g
@@ -173,6 +229,7 @@ pub fn isothermal_abg_background(
     gamma: f64,
     rho_s: f64,
     r_s: f64,
+    rho_c: Option<f64>,
     bounds: (f64, f64),
 ) {
     let rho = |r: f64| -> f64 {
@@ -185,7 +242,15 @@ pub fn isothermal_abg_background(
 
     let temperature_points = vec![temp; r_points.len()];
 
-    let rho_points = get_hydrostatic_profile(&r_points, dark_matter_rho_points, temperature_points);
+    let rho_points = match rho_c {
+        None => {
+            get_hydrostatic_profile_inwards(&r_points, dark_matter_rho_points, temperature_points)
+        }
+        Some(rho_c) => {
+            let external_field = get_force_points(dark_matter_rho_points, &r_points);
+            get_hydrostatic_profile_outwards(&r_points, external_field, temperature_points, rho_c)
+        }
+    };
 
     let number_density = {
         let mut num_density = Vec::with_capacity(rho_points.len());
@@ -242,6 +307,7 @@ pub fn isothermal_core_collapse_background(
     rho_s_0: f64,
     r_s_0: f64,
     collapse_progress: f64,
+    rho_c: Option<f64>,
     bounds: (f64, f64),
     plot: bool,
 ) -> (Vec<f64>, Vec<f64>) {
@@ -257,7 +323,7 @@ pub fn isothermal_core_collapse_background(
     let r_c = r_s_0
         * (2.555 * tau.sqrt() - 3.632 * tau + 2.131 * tau.powi(2) - 1.415 * tau.powi(3)
             + 0.4683 * tau.powi(4));
-    
+
     let rho = |r: f64| -> f64 {
         rho_s / (((r.powi(4) + r_c.powi(4)).sqrt().sqrt() / r_s) * (1.0 + (r / r_s)).powi(2))
     };
@@ -268,7 +334,15 @@ pub fn isothermal_core_collapse_background(
 
     let temperature_points = vec![temp; r_points.len()];
 
-    let rho_points = get_hydrostatic_profile(&r_points, dark_matter_rho_points, temperature_points);
+    let rho_points = match rho_c {
+        None => {
+            get_hydrostatic_profile_inwards(&r_points, dark_matter_rho_points, temperature_points)
+        }
+        Some(rho_c) => {
+            let external_field = get_force_points(dark_matter_rho_points, &r_points);
+            get_hydrostatic_profile_outwards(&r_points, external_field, temperature_points, rho_c)
+        }
+    };
 
     let number_density = {
         let mut num_density = Vec::with_capacity(rho_points.len());
@@ -277,6 +351,26 @@ pub fn isothermal_core_collapse_background(
         }
         num_density
     };
+
+    /*
+    let halo = Halo::NFW(rho_s, r_s);
+
+    let r_crit = halo.r_crit();
+    let mut high = r_points.len() - 1;
+    let mut low = 0;
+    while high - low > 1 {
+        let mid = (high + low) / 2;
+
+        if r_points[mid] > r_crit {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    dbg!(low);
+
+    println!("rho(r_crit): {}", rho_points[low]);
+    */
 
     if plot {
         plot_function(
