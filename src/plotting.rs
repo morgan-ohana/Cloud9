@@ -703,6 +703,7 @@ fn plot_2d_contours(
         }
     }
 
+    let mut count = 0;
     for (&x, &y) in x_data.iter().zip(y_data.iter()) {
         if x > x_max || x < x_min || y > y_max || y < y_min {
             continue;
@@ -719,54 +720,54 @@ fn plot_2d_contours(
             false => ((y - y_min) / (y_max - y_min) * grid_size as f64).floor() as usize,
         };
 
+        count += 1;
         density[x_bin][y_bin] += 1.0;
     }
 
-    // Normalize
-    let max_density = density
-        .iter()
-        .flatten()
-        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    //Normalize
+    for i in 0..grid_size {
+        for j in 0..grid_size {
+            density[i][j] /= count as f64
+        }
+    }
 
     let y_margin_width = match col {
         0 => LABEL_WIDTH + Y_LABEL_PAD,
         _ => LABEL_WIDTH
     };
 
-    if max_density > 0.0 {
-        match (LOG_SCALE[col], LOG_SCALE[row]) {
-            (true, true) => {
-                let mut chart = ChartBuilder::on(area)
-                    .margin_left(y_margin_width)
-                    .margin_bottom(LABEL_WIDTH)
-                    .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
+    match (LOG_SCALE[col], LOG_SCALE[row]) {
+        (true, true) => {
+            let mut chart = ChartBuilder::on(area)
+                .margin_left(y_margin_width)
+                .margin_bottom(LABEL_WIDTH)
+                .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
-            }
-            (true, false) => {
-                let mut chart = ChartBuilder::on(area)
-                    .margin_left(y_margin_width)
-                    .margin_bottom(LABEL_WIDTH)
-                    .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+        }
+        (true, false) => {
+            let mut chart = ChartBuilder::on(area)
+                .margin_left(y_margin_width)
+                .margin_bottom(LABEL_WIDTH)
+                .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
-            }
-            (false, true) => {
-                let mut chart = ChartBuilder::on(area)
-                    .margin_left(y_margin_width)
-                    .margin_bottom(LABEL_WIDTH)
-                    .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+        }
+        (false, true) => {
+            let mut chart = ChartBuilder::on(area)
+                .margin_left(y_margin_width)
+                .margin_bottom(LABEL_WIDTH)
+                .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
-            }
-            (false, false) => {
-                let mut chart = ChartBuilder::on(area)
-                    .margin_left(y_margin_width)
-                    .margin_bottom(LABEL_WIDTH)
-                    .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+        }
+        (false, false) => {
+            let mut chart = ChartBuilder::on(area)
+                .margin_left(y_margin_width)
+                .margin_bottom(LABEL_WIDTH)
+                .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-                draw_contour_content(&mut chart, &density, max_density, &edges, grid_size)?;
-            }
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
         }
     }
 
@@ -779,50 +780,127 @@ fn draw_contour_content(
         Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
     >,
     density: &Vec<Vec<f64>>,
-    max_density: f64,
     edges: &Vec<Vec<(f64, f64)>>,
     grid_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Draw contour lines at 10%, 30%, 50%, 70%, 90%
-    let contour_levels = [0.1, 0.3, 0.5, 0.7, 0.9];
 
-    // Draw filled regions for each level
-    for level_idx in 0..contour_levels.len() {
-        let level = contour_levels[level_idx];
-        let next_level = if level_idx + 1 < contour_levels.len() {
-            contour_levels[level_idx + 1]
+    let mut cells = Vec::with_capacity(grid_size.pow(2));
+    for i in 0..grid_size {
+        for j in 0..grid_size {
+            let x_start = edges[i][j].0;
+            let x_end = edges[i + 1][j].0;
+            let y_start = edges[i][j].1;
+            let y_end = edges[i][j + 1].1;
+
+            cells.push((density[i][j], (x_start, y_start), (x_end, y_end), (i, j)));
+        }
+    }
+
+    cells.sort_by(|cell_a, cell_b| cell_b.0.partial_cmp(&cell_a.0).unwrap());
+    
+    const CONTOUR_LEVELS: [f64; 5] = [0.118, 0.393, 0.675, 0.864, 0.956]; //[0.5, 1, 1.5, 2, 2.5] sigma for 2D gaussian
+    let mut cumulative_probability = 0.0;
+    let mut levels = vec![vec![0; grid_size]; grid_size];
+    
+    for mut cell in cells {
+        cumulative_probability += cell.0;
+        
+        let color = if cumulative_probability <= CONTOUR_LEVELS[0] {
+            levels[cell.3.0][cell.3.1] = 0;
+            RGBColor(255, 100, 100) // Red
+        } else if cumulative_probability <= CONTOUR_LEVELS[1] {
+            levels[cell.3.0][cell.3.1] = 1;
+            RGBColor(255, 200, 100) // Orange
+        } else if cumulative_probability <= CONTOUR_LEVELS[2] {
+            levels[cell.3.0][cell.3.1] = 2;
+            RGBColor(100, 255, 200) // Cyan
+        } else if cumulative_probability <= CONTOUR_LEVELS[3] {
+            levels[cell.3.0][cell.3.1] = 3;
+            RGBColor(100, 200, 255) // Light Blue
+        } else if cumulative_probability <= CONTOUR_LEVELS[4] {
+            levels[cell.3.0][cell.3.1] = 4;
+            RGBColor(100, 100, 255) // Blue
         } else {
-            1.0
+            levels[cell.3.0][cell.3.1] = 5;
+            continue;
         };
+    
+        chart.draw_series(std::iter::once(Rectangle::new(
+            [cell.1, cell.2],
+            color.mix(0.3).filled(),
+        )))?;
+    }
 
-        // For each cell, if density is between current and next level, fill it
-        for i in 0..grid_size {
-            for j in 0..grid_size {
-                let normalized_density = density[i][j] / max_density;
+    // Draw contours
+    draw_contour_around_level(chart, 1, &levels, edges, grid_size)?;
+    draw_contour_around_level(chart, 3, &levels, edges, grid_size)?;
 
-                if normalized_density >= level && normalized_density < next_level {
-                    let x_start = edges[i][j].0;
-                    let x_end = edges[i + 1][j].0;
-                    let y_start = edges[i][j].1;
-                    let y_end = edges[i][j + 1].1;
+    Ok(())
+}
 
-                    // Different colors for different levels
-                    let color = match level_idx {
-                        0 => RGBColor(100, 100, 255), // Blue
-                        1 => RGBColor(100, 200, 255), // Light blue
-                        2 => RGBColor(100, 255, 200), // Cyan
-                        3 => RGBColor(255, 200, 100), // Orange
-                        _ => RGBColor(255, 100, 100), // Red
-                    };
+fn draw_contour_around_level(
+    chart: &mut ChartContext<
+        BitMapBackend,
+        Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
+    >,
+    level: u32,
+    levels: &Vec<Vec<u32>>,
+    edges: &Vec<Vec<(f64, f64)>>,
+    grid_size: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut points = Vec::new();
 
-                    chart.draw_series(std::iter::once(Rectangle::new(
-                        [(x_start, y_start), (x_end, y_end)],
-                        color.mix(0.3).filled(),
-                    )))?;
+    for i in 0..grid_size {
+        for j in 0..grid_size {
+            for a in i.saturating_sub(1)..=(i+1).min(grid_size - 1) {
+                for b in j.saturating_sub(1)..=(j+1).min(grid_size - 1) {
+                    if levels[i][j] != level {
+                        continue;
+                    }
+                    
+                    // contour edge in plot
+                    if levels[a][b] > level {
+                        // edge i lies between i and i-1 so for two neighbors the greater is the idx of the edge between them
+                        points.push(edges[i.max(a)][j.max(b)]);
+                    }
+
+                    // plot edge
+                    if i == 0 {
+                        points.push(edges[0][j]);
+                        points.push(edges[0][j+1]);
+                    } else if i == grid_size - 1 {
+                        points.push(edges[grid_size][j]);
+                        points.push(edges[grid_size][j+1]);
+                    }
+
+                    if j == 0 {
+                        points.push(edges[i][0]);
+                        points.push(edges[i+1][0]);
+                    } else if j == grid_size - 1 {
+                        points.push(edges[i][grid_size]);
+                        points.push(edges[i+1][grid_size]);
+                    }
                 }
             }
         }
     }
+
+    // Calculate centroid
+    let (sum_x, sum_y) = points.iter()
+        .fold((0.0, 0.0), |(sx, sy), &(x, y)| (sx + x, sy + y));
+    let centroid = (sum_x / points.len() as f64, sum_y / points.len() as f64);
+    
+    // Sort by angle relative to centroid
+    points.sort_by(|&(x1, y1), &(x2, y2)| {
+        let angle1 = (y1 - centroid.1).atan2(x1 - centroid.0);
+        let angle2 = (y2 - centroid.1).atan2(x2 - centroid.0);
+        angle1.partial_cmp(&angle2).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    chart.draw_series(std::iter::once(PathElement::new(
+        points,
+        &BLACK,
+    )))?;
 
     Ok(())
 }
