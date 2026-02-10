@@ -1,4 +1,5 @@
-use core::num;
+use std::fs;
+use std::path::Path;
 use std::f64::consts::PI;
 
 use crate::constants::*;
@@ -17,7 +18,21 @@ mod hydrostatics;
 mod logging;
 mod plotting;
 
+fn ensure_dir_exists(path: &str) -> Result<(), std::io::Error> {
+    let path = Path::new(path);
+    
+    if !path.exists() {
+        // Create directory and all parent directories if needed
+        fs::create_dir_all(path)?;
+    }
+    
+    Ok(())
+}
+
 fn main() {
+    ensure_dir_exists("data").unwrap();
+    ensure_dir_exists("trace_plots").unwrap();    
+
     let data = vec![
         (0.15649748494408605, 15595734576138530000.0),
         (0.18722388772639217, 15290963190523656000.0),
@@ -34,6 +49,24 @@ fn main() {
         (1.3771319397378698, 3511010519320841000.0),
         (1.6463993031339876, 2293590617222256000.0),
         (1.983419488324015, 1615272370298475800.0),
+    ];
+
+    let data_y_err_bar = vec![
+        (13732078146520720000.0, 17466755309837742000.0),
+        (13427854263419597000.0, 17229242059185019000.0),
+        (13003516161985374000.0, 16866179741318795000.0),
+        (12461619020702566000.0, 16448095066290774000.0),
+        (11695185329352206000.0, 15955195009096049000.0),
+        (10716711258649842000.0, 15359790383829522000.0),
+        (9581053603324199000.0, 14708083512691229000.0),
+        (8205955659163100000.0, 13903084887830374000.0),
+        (6793221053775176000.0, 12983171214351038000.0),
+        (5337519460514788000.0, 11805617040307792000.0),
+        (3880856839277999600.0, 10151147099502905000.0),
+        (2370604088405835000.0, 8104671612570444000.0),
+        (684370527200647700.0, 6345004385610885000.0),
+        (583937029257837200.0, 5195521117287574000.0),
+        (583937029257837200.0, 4312913465944557000.0),
     ];
 
     // Found by grad descent:
@@ -53,7 +86,7 @@ fn main() {
 
     let mcmc: bool = true;
     let inwards: bool = false;
-    let premade: Option<String> = Some(String::from("data/320_x_10k.mcmc"));
+    let premade: Option<String> = None; //Some(String::from("data/320_x_10k.mcmc"));
     let params: [f64; 4];
 
     if mcmc {
@@ -69,6 +102,7 @@ fn main() {
         } else {
             (m200_params, chain, likelihoods) = find_parameters_mcmc(
                 &data,
+                Some(&data_y_err_bar),
                 //[1e8, 5.0, 0.5,false//bad guess
                 [2e9, 10.0, 0.2, 5.5e4],
                 None,
@@ -116,7 +150,7 @@ fn main() {
             &chain,
             &[&grad_descent_fit, &mean_params, &m200_params],
             &["m200_0", "c200_0", "tau", "rho_c"],
-            "corner_plot.png",
+            "corner_plot",
             (burn_in as f64) / (steps as f64),
             inwards,
             &bounds,
@@ -179,7 +213,7 @@ fn main() {
     plot_function(
         &fit.0,
         &fit.1,
-        "fit.png",
+        "fit.svg",
         "Fit To Observed Profile",
         "r (arcmin)",
         "n_H (num / cm^2)",

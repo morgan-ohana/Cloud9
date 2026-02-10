@@ -11,6 +11,7 @@ use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_fu
 
 pub fn find_parameters_mcmc(
     data: &Vec<(f64, f64)>,
+    y_error_bar: Option<&Vec<(f64, f64)>>,
     initial_guess: [f64; 4],
     fix_tau: Option<f64>,
     num_steps: usize,
@@ -21,6 +22,7 @@ pub fn find_parameters_mcmc(
     // Run parallel chains
     let (chains, overall_best) = find_parameters_mcmc_parallel(
         data,
+        y_error_bar,
         initial_guess,
         fix_tau,
         num_steps,
@@ -66,6 +68,7 @@ pub fn combine_chains(
 
 fn find_parameters_mcmc_parallel(
     data: &Vec<(f64, f64)>,
+    y_error_bar: Option<&Vec<(f64, f64)>>,
     initial_guess: [f64; 4],
     fix_tau: Option<f64>,
     num_steps: usize,
@@ -103,6 +106,7 @@ fn find_parameters_mcmc_parallel(
             // Run single chain
             let (best_params, chain, likelihoods) = run_single_chain(
                 data,
+                y_error_bar,
                 chain_initial_guess,
                 fix_tau,
                 num_steps,
@@ -207,6 +211,7 @@ fn calculate_gelman_rubin(
 
 fn run_single_chain(
     data: &Vec<(f64, f64)>,
+    y_error_bar: Option<&Vec<(f64, f64)>>,
     initial_guess: [f64; 4], // m200, c200, tau
     fix_tau: Option<f64>,
     num_steps: usize,
@@ -216,7 +221,7 @@ fn run_single_chain(
     chain_id: usize,
 ) -> ([f64; 4], Vec<[f64; 4]>, Vec<f64>) {
     let mut current_params = initial_guess;
-    let mut current_log_likelihood = log_likelihood(current_params, data, inwards);
+    let mut current_log_likelihood = log_likelihood(current_params, data, y_error_bar, inwards);
 
     let mut accepted = 0;
     let mut chain = Vec::with_capacity(num_steps);
@@ -263,7 +268,7 @@ fn run_single_chain(
         }
 
         // Calculate log likelihood for proposed parameters
-        let proposed_log_likelihood = log_likelihood(proposed_params, data, inwards);
+        let proposed_log_likelihood = log_likelihood(proposed_params, data, y_error_bar, inwards);
 
         // Metropolis-Hast acceptance ratio
         let acceptance_ratio = (proposed_log_likelihood - current_log_likelihood).exp();
@@ -391,15 +396,74 @@ pub fn find_parameters_gradient_descent(
     params
 }
 
-fn log_likelihood(params: [f64; 4], data: &Vec<(f64, f64)>, inwards: bool) -> f64 {
-    let error = get_rms_err_of_fit(UVB_TEMP, params, data, true, inwards);
+fn log_likelihood(params: [f64; 4], data: &Vec<(f64, f64)>, y_error_bar: Option<&Vec<(f64, f64)>>, inwards: bool) -> f64 {
+    match y_error_bar {
+        None => {
+            let error = get_rms_err_of_fit(UVB_TEMP, params, data, true, inwards);
 
-    // Gaussian log-likelihood: -0.5 * χ²
-    // where χ² = n * error² (since error is RMS)
-    let n = data.len() as f64;
-    let chi_squared = n * error.powi(2);
+            // Gaussian log-likelihood: -0.5 * χ²
+            // where χ² = n * error² (since error is RMS)
+            let n = data.len() as f64;
+            let chi_squared = n * error.powi(2);
 
-    -0.5 * chi_squared
+            -0.5 * chi_squared
+        }
+        Some(y_error_bar) => -0.5 * get_chi_squared_of_fit(UVB_TEMP, params, data, y_error_bar, true, inwards)
+    }
+}
+
+fn get_chi_squared_of_fit(
+    temp: f64,
+    mut params: [f64; 4],
+    data: &Vec<(f64, f64)>,
+    y_error_bar: &Vec<(f64, f64)>,
+    m200_input: bool,
+    inwards: bool,
+) -> f64 {
+    if m200_input {
+        // recieved as m200, c200, tau, rho_c
+        (params[1], params[0]) = m200_c200_to_rs_rhos(params[0], params[1]);
+    }
+
+    let halo = Halo::NFW(params[0], params[1]);
+
+    let rho_c = match inwards {
+        true => None,
+        false => Some(params[3]),
+    };
+
+    // must be passed as rho_s_0, r_s_0, tau, rho_c
+    let fit = isothermal_core_collapse_background(
+        temp,
+        params[0],
+        params[1],
+        params[2],
+        rho_c,
+        (0.1 * data[0].0, halo.r_crit()),
+        false,
+    );
+
+    let mut chi_squared = 0.0;
+    for i in 0..data.len() {
+        let point = data[i];
+        
+        let mut high = fit.0.len() - 1;
+        let mut low = 0;
+        while high - low > 1 {
+            let mid = (low + high) / 2;
+            if point.0 > fit.0[mid] {
+                low = mid
+            } else {
+                high = mid
+            }
+        }
+
+        let spread = y_error_bar[i].1 - y_error_bar[i].0;
+        chi_squared += ((fit.1[low] - point.1) / spread).powi(2);
+    }
+
+    chi_squared /= data.len() as f64;
+    chi_squared.sqrt()
 }
 
 fn get_rms_err_of_fit(

@@ -12,7 +12,8 @@ pub fn plot_function(
     legend: Option<String>,
     data: Option<&Vec<(f64, f64)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new(filename, (1024, 768)).into_drawing_area();
+    //let root = BitMapBackend::new(filename, (1024, 768)).into_drawing_area();
+    let root = SVGBackend::new(filename, (1024, 768)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let mut y_min = f64::MAX;
@@ -214,8 +215,11 @@ pub fn create_corner_plot(
         }
     }
 
+    let output_path = String::from(output_path);
+    let svg_path = &(output_path.clone() + ".svg");
+    let pdf_path = &(output_path.clone() + ".pdf");
     // Create plot area
-    let root = BitMapBackend::new(output_path, (1600, 1600)).into_drawing_area();
+    let root = SVGBackend::new(svg_path, (1600, 1600)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let plot_width = 1600 - LABEL_WIDTH - 5;
@@ -267,12 +271,28 @@ pub fn create_corner_plot(
     }
 
     root.present()?;
-    println!("Corner plot saved to: {}", output_path);
-    Ok(())
+    println!("Corner plot saved to: {}.svg", output_path);
+
+    
+    let status = std::process::Command::new("inkscape")
+        .args(&[
+            "--export-type=pdf",
+            "--export-filename",
+            pdf_path,
+            svg_path,
+        ])
+        .status()?;
+    
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Inkscape failed with status: {}", status).into())
+    }
+    
 }
 
 fn plot_histogram(
-    area: &DrawingArea<BitMapBackend, Shift>,
+    area: &DrawingArea<SVGBackend, Shift>,
     data: &[f64],
     param_name: &str,
     (row, col): (usize, usize),
@@ -388,7 +408,7 @@ fn draw_hist_content<
     X: Ranged<ValueType = f64> + ValueFormatter<f64>,
     Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
 >(
-    chart: &mut ChartContext<BitMapBackend, Cartesian2d<X, Y>>,
+    chart: &mut ChartContext<SVGBackend, Cartesian2d<X, Y>>,
     param_name: &str,
     bins: &Vec<u32>,
     edges: &Vec<f64>,
@@ -427,7 +447,7 @@ fn draw_hist_content<
 }
 
 fn plot_2d_scatter(
-    area: &DrawingArea<BitMapBackend, Shift>,
+    area: &DrawingArea<SVGBackend, Shift>,
     x_data: &[f64],
     y_data: &[f64],
     param_names: &[&str; 4],
@@ -537,7 +557,7 @@ fn draw_scatter_content<
     X: Ranged<ValueType = f64> + ValueFormatter<f64>,
     Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
 >(
-    chart: &mut ChartContext<BitMapBackend, Cartesian2d<X, Y>>,
+    chart: &mut ChartContext<SVGBackend, Cartesian2d<X, Y>>,
     thinned_x: &Vec<f64>,
     thinned_y: &Vec<f64>,
     param_names: &[&str; 4],
@@ -596,7 +616,7 @@ fn draw_scatter_content<
 }
 
 fn plot_kde(
-    area: &DrawingArea<BitMapBackend, Shift>,
+    area: &DrawingArea<SVGBackend, Shift>,
     data: &[f64],
     min: f64,
     max: f64,
@@ -671,7 +691,7 @@ fn plot_kde(
 }
 
 fn plot_2d_contours(
-    area: &DrawingArea<BitMapBackend, Shift>,
+    area: &DrawingArea<SVGBackend, Shift>,
     x_data: &[f64],
     y_data: &[f64],
     x_min: f64,
@@ -776,7 +796,7 @@ fn plot_2d_contours(
 
 fn draw_contour_content(
     chart: &mut ChartContext<
-        BitMapBackend,
+        SVGBackend,
         Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
     >,
     density: &Vec<Vec<f64>>,
@@ -840,7 +860,7 @@ fn draw_contour_content(
 
 fn draw_contour_around_level(
     chart: &mut ChartContext<
-        BitMapBackend,
+        SVGBackend,
         Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
     >,
     level: u32,
@@ -906,7 +926,7 @@ fn draw_contour_around_level(
 }
 
 fn plot_correlation(
-    area: &DrawingArea<BitMapBackend, Shift>,
+    area: &DrawingArea<SVGBackend, Shift>,
     x_data: &[f64],
     y_data: &[f64],
 ) -> Result<(), Box<dyn std::error::Error>> {
