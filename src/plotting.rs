@@ -124,7 +124,6 @@ pub fn plot_function(
 
 pub fn create_chain_trace_plots(
     chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
-    burn_in: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use plotters::prelude::*;
 
@@ -149,34 +148,57 @@ pub fn create_chain_trace_plots(
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let p05 = sorted[(sorted.len() as f64 * 0.05) as usize];
             let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];
-            let y_range = p05..p95;
 
-            let mut chart = ChartBuilder::on(&area)
-                .caption(
-                    format!("Chain {}: {}", chain_id, param_names[param_idx]),
-                    ("sans-serif", 16),
-                )
-                .margin(10)
-                .build_cartesian_2d(0..chain.len(), y_range)?;
+            match LOG_SCALE[param_idx] {
+                true => {
+                    let y_range = (p05..p95).log_scale();
 
-            chart
-                .configure_mesh()
-                .x_desc("Step")
-                .y_desc("Value")
-                .label_style(("sans-serif", 10))
-                .draw()?;
+                    let mut chart = ChartBuilder::on(&area)
+                        .caption(
+                            format!("Chain {}: {}", chain_id, param_names[param_idx]),
+                            ("sans-serif", 16),
+                        )
+                        .margin(10)
+                        .build_cartesian_2d(0..chain.len(), y_range)?;
 
-            // Plot trace
-            chart.draw_series(LineSeries::new(
-                data.iter().enumerate().map(|(i, &v)| (i, v)),
-                &BLUE,
-            ))?;
+                    chart
+                        .configure_mesh()
+                        .x_desc("Step")
+                        .y_desc("Value")
+                        .label_style(("sans-serif", 10))
+                        .draw()?;
 
-            // Mark burn-in cutoff
-            chart.draw_series(std::iter::once(PathElement::new(
-                vec![(burn_in, p05), (burn_in, p95)],
-                &RED,
-            )))?;
+                    // Plot trace
+                    chart.draw_series(LineSeries::new(
+                        data.iter().enumerate().map(|(i, &v)| (i, v)),
+                        &BLUE,
+                    ))?;
+                }
+                false => {
+                    let y_range = p05..p95;
+
+                    let mut chart = ChartBuilder::on(&area)
+                        .caption(
+                            format!("Chain {}: {}", chain_id, param_names[param_idx]),
+                            ("sans-serif", 16),
+                        )
+                        .margin(10)
+                        .build_cartesian_2d(0..chain.len(), y_range)?;
+
+                    chart
+                        .configure_mesh()
+                        .x_desc("Step")
+                        .y_desc("Value")
+                        .label_style(("sans-serif", 10))
+                        .draw()?;
+
+                    // Plot trace
+                    chart.draw_series(LineSeries::new(
+                        data.iter().enumerate().map(|(i, &v)| (i, v)),
+                        &BLUE,
+                    ))?;
+                }
+            }
         }
 
         root.present()?;
@@ -194,14 +216,9 @@ pub fn create_corner_plot(
     marked_points: &[&[f64; 4]],
     param_names: &[&str; 4],
     output_path: &str,
-    burn_in_fraction: f64,
     inwards: bool,
     bounds: &[[f64; 2]; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Remove burn-in
-    let burn_in = (chain.len() as f64 * burn_in_fraction) as usize;
-    let chain = &chain[burn_in..];
-
     let num_params = match inwards {
         true => 3,
         false => 4,
@@ -224,14 +241,18 @@ pub fn create_corner_plot(
 
     let plot_width = 1600 - LABEL_WIDTH - 5;
 
-    let x_break_points = [plot_width/4 + Y_LABEL_PAD, plot_width/2 + Y_LABEL_PAD, 3*plot_width/4 + Y_LABEL_PAD];
-    let y_break_points = [plot_width/4, plot_width/2, 3*plot_width/4];
+    let x_break_points = [
+        plot_width / 4 + Y_LABEL_PAD,
+        plot_width / 2 + Y_LABEL_PAD,
+        3 * plot_width / 4 + Y_LABEL_PAD,
+    ];
+    let y_break_points = [plot_width / 4, plot_width / 2, 3 * plot_width / 4];
 
     // Split into 4x4 subplots
     let sub_areas = root
         .margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5)
         .split_by_breakpoints(x_break_points, y_break_points);
-        //.split_evenly((num_params, num_params));
+    //.split_evenly((num_params, num_params));
 
     // Plot each cell
     for row in 0..num_params {
@@ -273,22 +294,15 @@ pub fn create_corner_plot(
     root.present()?;
     println!("Corner plot saved to: {}.svg", output_path);
 
-    
     let status = std::process::Command::new("inkscape")
-        .args(&[
-            "--export-type=pdf",
-            "--export-filename",
-            pdf_path,
-            svg_path,
-        ])
+        .args(&["--export-type=pdf", "--export-filename", pdf_path, svg_path])
         .status()?;
-    
+
     if status.success() {
         Ok(())
     } else {
         Err(format!("Inkscape failed with status: {}", status).into())
     }
-    
 }
 
 fn plot_histogram(
@@ -659,7 +673,7 @@ fn plot_kde(
 
     let y_margin_width = match col {
         0 => LABEL_WIDTH + Y_LABEL_PAD,
-        _ => LABEL_WIDTH
+        _ => LABEL_WIDTH,
     };
 
     match log_scale {
@@ -725,7 +739,7 @@ fn plot_2d_contours(
 
     let mut count = 0;
     for (&x, &y) in x_data.iter().zip(y_data.iter()) {
-        if x > x_max || x < x_min || y > y_max || y < y_min {
+        if x >= x_max || x < x_min || y >= y_max || y < y_min {
             continue;
         }
 
@@ -753,7 +767,7 @@ fn plot_2d_contours(
 
     let y_margin_width = match col {
         0 => LABEL_WIDTH + Y_LABEL_PAD,
-        _ => LABEL_WIDTH
+        _ => LABEL_WIDTH,
     };
 
     match (LOG_SCALE[col], LOG_SCALE[row]) {
@@ -763,7 +777,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
         }
         (true, false) => {
             let mut chart = ChartBuilder::on(area)
@@ -771,7 +785,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
         }
         (false, true) => {
             let mut chart = ChartBuilder::on(area)
@@ -779,7 +793,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
         }
         (false, false) => {
             let mut chart = ChartBuilder::on(area)
@@ -787,7 +801,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
         }
     }
 
@@ -802,8 +816,8 @@ fn draw_contour_content(
     density: &Vec<Vec<f64>>,
     edges: &Vec<Vec<(f64, f64)>>,
     grid_size: usize,
+    (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     let mut cells = Vec::with_capacity(grid_size.pow(2));
     for i in 0..grid_size {
         for j in 0..grid_size {
@@ -817,14 +831,14 @@ fn draw_contour_content(
     }
 
     cells.sort_by(|cell_a, cell_b| cell_b.0.partial_cmp(&cell_a.0).unwrap());
-    
+
     const CONTOUR_LEVELS: [f64; 5] = [0.118, 0.393, 0.675, 0.864, 0.956]; //[0.5, 1, 1.5, 2, 2.5] sigma for 2D gaussian
     let mut cumulative_probability = 0.0;
     let mut levels = vec![vec![0; grid_size]; grid_size];
-    
-    for mut cell in cells {
+
+    for cell in cells {
         cumulative_probability += cell.0;
-        
+
         let color = if cumulative_probability <= CONTOUR_LEVELS[0] {
             levels[cell.3.0][cell.3.1] = 0;
             RGBColor(255, 100, 100) // Red
@@ -844,7 +858,7 @@ fn draw_contour_content(
             levels[cell.3.0][cell.3.1] = 5;
             continue;
         };
-    
+
         chart.draw_series(std::iter::once(Rectangle::new(
             [cell.1, cell.2],
             color.mix(0.3).filled(),
@@ -852,8 +866,8 @@ fn draw_contour_content(
     }
 
     // Draw contours
-    draw_contour_around_level(chart, 1, &levels, edges, grid_size)?;
-    draw_contour_around_level(chart, 3, &levels, edges, grid_size)?;
+    draw_contour_around_level(chart, 1, &levels, edges, grid_size, (row, col))?;
+    draw_contour_around_level(chart, 3, &levels, edges, grid_size, (row, col))?;
 
     Ok(())
 }
@@ -867,17 +881,18 @@ fn draw_contour_around_level(
     levels: &Vec<Vec<u32>>,
     edges: &Vec<Vec<(f64, f64)>>,
     grid_size: usize,
+    (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut points = Vec::new();
 
     for i in 0..grid_size {
         for j in 0..grid_size {
-            for a in i.saturating_sub(1)..=(i+1).min(grid_size - 1) {
-                for b in j.saturating_sub(1)..=(j+1).min(grid_size - 1) {
+            for a in i.saturating_sub(1)..=(i + 1).min(grid_size - 1) {
+                for b in j.saturating_sub(1)..=(j + 1).min(grid_size - 1) {
                     if levels[i][j] != level {
                         continue;
                     }
-                    
+
                     // contour edge in plot
                     if levels[a][b] > level {
                         // edge i lies between i and i-1 so for two neighbors the greater is the idx of the edge between them
@@ -887,18 +902,18 @@ fn draw_contour_around_level(
                     // plot edge
                     if i == 0 {
                         points.push(edges[0][j]);
-                        points.push(edges[0][j+1]);
+                        points.push(edges[0][j + 1]);
                     } else if i == grid_size - 1 {
                         points.push(edges[grid_size][j]);
-                        points.push(edges[grid_size][j+1]);
+                        points.push(edges[grid_size][j + 1]);
                     }
 
                     if j == 0 {
                         points.push(edges[i][0]);
-                        points.push(edges[i+1][0]);
+                        points.push(edges[i + 1][0]);
                     } else if j == grid_size - 1 {
                         points.push(edges[i][grid_size]);
-                        points.push(edges[i+1][grid_size]);
+                        points.push(edges[i + 1][grid_size]);
                     }
                 }
             }
@@ -906,21 +921,40 @@ fn draw_contour_around_level(
     }
 
     // Calculate centroid
-    let (sum_x, sum_y) = points.iter()
-        .fold((0.0, 0.0), |(sx, sy), &(x, y)| (sx + x, sy + y));
-    let centroid = (sum_x / points.len() as f64, sum_y / points.len() as f64);
-    
+    let (sum_x, sum_y) = points.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| {
+        let x_val = match LOG_SCALE[col] {
+            true => x.ln(),
+            false => x,
+        };
+        let y_val = match LOG_SCALE[row] {
+            true => y.ln(),
+            false => y,
+        };
+        (sx + x_val, sy + y_val)
+    });
+
+    let mut centroid = (sum_x / points.len() as f64, sum_y / points.len() as f64);
+
+    if LOG_SCALE[col] {
+        centroid.0 = centroid.0.exp()
+    }
+    if LOG_SCALE[row] {
+        centroid.1 = centroid.1.exp()
+    }
+
     // Sort by angle relative to centroid
     points.sort_by(|&(x1, y1), &(x2, y2)| {
         let angle1 = (y1 - centroid.1).atan2(x1 - centroid.0);
         let angle2 = (y2 - centroid.1).atan2(x2 - centroid.0);
-        angle1.partial_cmp(&angle2).unwrap_or(std::cmp::Ordering::Equal)
+        angle1
+            .partial_cmp(&angle2)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    chart.draw_series(std::iter::once(PathElement::new(
-        points,
-        &BLACK,
-    )))?;
+    // Close loop
+    points.push(points[0].clone());
+
+    chart.draw_series(std::iter::once(PathElement::new(points, &BLACK)))?;
 
     Ok(())
 }

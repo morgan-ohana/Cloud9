@@ -1,15 +1,16 @@
+use std::f64::consts::PI;
 use std::fs;
 use std::path::Path;
-use std::f64::consts::PI;
 
 use crate::constants::*;
 use crate::fitting::{
-    calculate_statistics, find_parameters_gradient_descent, find_parameters_mcmc,
+    calculate_gelman_rubin, calculate_statistics, find_parameters_gradient_descent,
+    find_parameters_mcmc, split_chains,
 };
 use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
 use crate::hydrostatics::{isothermal_abg_background, isothermal_core_collapse_background};
 use crate::logging::{load_file, save_output, save_output_json};
-use crate::plotting::{create_corner_plot, plot_function};
+use crate::plotting::{create_chain_trace_plots, create_corner_plot, plot_function};
 
 mod constants;
 mod fitting;
@@ -20,18 +21,18 @@ mod plotting;
 
 fn ensure_dir_exists(path: &str) -> Result<(), std::io::Error> {
     let path = Path::new(path);
-    
+
     if !path.exists() {
         // Create directory and all parent directories if needed
         fs::create_dir_all(path)?;
     }
-    
+
     Ok(())
 }
 
 fn main() {
     ensure_dir_exists("data").unwrap();
-    ensure_dir_exists("trace_plots").unwrap();    
+    ensure_dir_exists("trace_plots").unwrap();
 
     let data = vec![
         (0.15649748494408605, 15595734576138530000.0),
@@ -65,8 +66,8 @@ fn main() {
         (3880856839277999600.0, 10151147099502905000.0),
         (2370604088405835000.0, 8104671612570444000.0),
         (684370527200647700.0, 6345004385610885000.0),
-        (583937029257837200.0, 5195521117287574000.0),
-        (583937029257837200.0, 4312913465944557000.0),
+        (4.4698143061e17, 5195521117287574000.0), // Lower bound for these two just y - 2(y_err_upper - y)
+        (2.2656655652e17, 4312913465944557000.0), // ditto
     ];
 
     // Found by grad descent:
@@ -86,25 +87,30 @@ fn main() {
 
     let mcmc: bool = true;
     let inwards: bool = false;
-    let premade: Option<String> = None; //Some(String::from("data/320_x_10k.mcmc"));
+    let burn_in = 1000;
+    let num_chains = 320;
+    let real_steps = 100000;
+    let steps = real_steps + burn_in;
+    let file_name = format!("{}_x_{}k", num_chains, real_steps / 1000);
+    let file_path = String::from("data/") + &file_name;
+    let premade: Option<String> = Some(file_path.clone() + ".mcmc");
     let params: [f64; 4];
 
     if mcmc {
         let (m200_params, chain, likelihoods): ([f64; 4], Vec<[f64; 4]>, Vec<f64>);
-        let num_chains = 320;
-        let steps = 10000;
-        let burn_in = 1000;
         if let Some(filename) = premade {
             let mcmc_output = load_file(filename).unwrap();
             m200_params = mcmc_output.best_params;
             chain = mcmc_output.chain;
             likelihoods = mcmc_output.likelihoods;
         } else {
+            let bounds = [(1e6, 1e12), (0.0, 30.0), (0.0, 1.0), (1e1, 1e6)];
             (m200_params, chain, likelihoods) = find_parameters_mcmc(
                 &data,
-                Some(&data_y_err_bar),
+                &data_y_err_bar,
                 //[1e8, 5.0, 0.5,false//bad guess
                 [2e9, 10.0, 0.2, 5.5e4],
+                bounds,
                 None,
                 steps,
                 burn_in,
@@ -113,8 +119,10 @@ fn main() {
             )
             .unwrap();
 
+            dbg!(chain.len());
+
             save_output(
-                format!("data/{}_x_{}k.mcmc", num_chains, steps / 1000),
+                file_path.clone() + ".mcmc",
                 m200_params,
                 chain.clone(),
                 likelihoods.clone(),
@@ -122,21 +130,38 @@ fn main() {
             .unwrap();
 
             save_output_json(
-                format!("data/{}_x_{}k.json", num_chains, steps / 1000),
+                file_path.clone() + ".json",
                 m200_params,
                 chain.clone(),
                 likelihoods.clone(),
             )
             .unwrap();
-
-            
         }
 
         let mean_params = calculate_statistics(&chain, &m200_params);
 
-        let bounds = [[1e7, 1e11], [0.0, 20.0], [0.0, 1.0], [1e2, 1e6]];
+        let bounds = [[1e8, 1e12], [0.0, 20.0], [0.0, 1.0], [1e4, 1e6]];
 
         check_chain_behavior(&chain, inwards);
+
+        dbg!(chain.len());
+        dbg!(chain.len() as f64 / 32.0);
+
+        let chains = split_chains(&(m200_params, chain.clone(), likelihoods), real_steps);
+
+        //create_chain_trace_plots(&chains).unwrap();
+
+        let r_hat = calculate_gelman_rubin(&chains, inwards);
+        println!("Gelman-Rubin R-hat statistics: {:?}", r_hat);
+
+        let converged = r_hat.iter().all(|&r| r < 1.1);
+
+        if !converged {
+            println!("Warning: Chains may not have converged (R-hat > 1.1)");
+            println!("Consider running more steps or tuning step sizes.");
+        } else {
+            println!("Chains appear to have converged (R-hat < 1.1)");
+        }
 
         let grad_descent_fit = {
             let mut params = sidm_fit_params.clone();
@@ -150,8 +175,7 @@ fn main() {
             &chain,
             &[&grad_descent_fit, &mean_params, &m200_params],
             &["m200_0", "c200_0", "tau", "rho_c"],
-            "corner_plot",
-            (burn_in as f64) / (steps as f64),
+            &(String::from("corner_plot_") + &file_name),
             inwards,
             &bounds,
         )
