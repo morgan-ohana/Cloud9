@@ -1,64 +1,35 @@
 use core::num;
+use plotters::prelude::IntoLogRange;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
+use serde::de::value::UsizeDeserializer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::UVB_TEMP;
-use crate::halo::{Halo, m200_c200_to_rs_rhos};
+use crate::halo::{Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation};
 use crate::plotting::create_chain_trace_plots;
 use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_function};
 
-pub fn find_parameters_mcmc(
-    data: &Vec<(f64, f64)>,
-    y_error_bar: &Vec<(f64, f64)>,
-    initial_guess: [f64; 4],
-    bounds: [(f64, f64); 4],
-    fix_tau: Option<f64>,
-    num_steps: usize,
-    burn_in: usize,
-    inwards: bool,
-    num_chains: usize,
-) -> Result<([f64; 4], Vec<[f64; 4]>, Vec<f64>), Box<dyn std::error::Error>> {
-    // Run parallel chains
-    let (chains, overall_best) = find_parameters_mcmc_parallel(
-        data,
-        y_error_bar,
-        initial_guess,
-        bounds,
-        fix_tau,
-        num_steps,
-        burn_in,
-        inwards,
-        num_chains,
-    );
-
-    // Combine chains for analysis
-    let (combined_chain, combined_likelihoods) = combine_chains(&chains);
-
-    // Check convergence
-    let r_hat = calculate_gelman_rubin(&chains, inwards);
-    println!("Gelman-Rubin R-hat statistics: {:?}", r_hat);
-    let converged = r_hat.iter().all(|&r| r < 1.1);
-
-    if !converged {
-        println!("Warning: Chains may not have converged (R-hat > 1.1)");
-        println!("Consider running more steps or tuning step sizes.");
-    } else {
-        println!("Chains appear to have converged (R-hat < 1.1)");
-    }
-
-    // Create trace plots for each chain
-    create_chain_trace_plots(&chains)?;
-
-    Ok((overall_best, combined_chain, combined_likelihoods))
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Walker {
     params: [f64; 4],
     log_prob: f64,
+    rng: Pcg64,
+}
+
+impl Walker {
+    fn lin_params(&self) -> [f64; 4] {
+        let mut lin_params = self.params.clone();
+        for s in 0..4 {
+            if LOG_SCALE[s] {
+                lin_params[s] = 10.0_f64.powf(self.params[s])
+            }
+        }
+
+        lin_params
+    }
 }
 
 fn sample_z(rng: &mut impl Rng, a: f64) -> f64 {
@@ -76,6 +47,7 @@ fn stretch_move_parallel(
     walkers: &mut [Walker],
     log_likelihood: &(impl Fn([f64; 4]) -> f64 + std::marker::Sync),
     a: f64,
+    bounds: &[[f64; 2]; 4],
 ) {
     let n = walkers.len();
     let d = 4;
@@ -84,72 +56,95 @@ fn stretch_move_parallel(
     let walkers_old = walkers.to_vec();
 
     walkers.par_iter_mut().enumerate().for_each(|(i, walker)| {
-        let mut rng = Pcg64::seed_from_u64(1234 + i as u64);
-
         // choose partner
-        let mut j = rng.random_range(0..n);
+        let mut j = walker.rng.random_range(0..n);
         while j == i {
-            j = rng.random_range(0..n);
+            j = walker.rng.random_range(0..n);
         }
 
-        let z = sample_z(&mut rng, a);
+        let z = sample_z(&mut walker.rng, a);
         let mut proposal = walker.params;
 
         for k in 0..d {
             proposal[k] =
                 walkers_old[j].params[k] + z * (walker.params[k] - walkers_old[j].params[k]);
+
+            if proposal[k] < bounds[k][0] || proposal[k] > bounds[k][1] {
+                // if out of bounds just stop.
+                // Walker won't move so this will correctly count as a rejection
+                return;
+            }
         }
 
         let proposed_log_prob = log_likelihood(proposal);
+
         let log_accept = (d as f64 - 1.0) * z.ln() + proposed_log_prob - walker.log_prob;
 
-        if log_accept >= 0.0 || rng.random::<f64>() < log_accept.exp() {
+        if log_accept >= 0.0 || walker.rng.random::<f64>() < log_accept.exp() {
             walker.params = proposal;
             walker.log_prob = proposed_log_prob;
         }
     });
 }
 
-fn run_ensemble_sampler(
+const LOG_SCALE: [bool; 4] = [true, false, false, true];
+pub fn find_parameters_mcmc(
     data: &Vec<(f64, f64)>,
     y_error_bar: &Vec<(f64, f64)>,
     initial_guess: [f64; 4],
+    lin_bounds: &[[f64; 2]; 4],
     num_steps: usize,
     burn_in: usize,
     n_walkers: usize,
-    inwards: bool,
-) -> (Vec<[f64; 4]>, Vec<f64>) {
+) -> ([f64; 4], Vec<[f64; 4]>, Vec<f64>) {
+    let bounds = {
+        let mut bounds = lin_bounds.clone();
+        for s in 0..4 {
+            if LOG_SCALE[s] {
+                bounds[s][0] = bounds[s][0].log10();
+                bounds[s][1] = bounds[s][1].log10();
+            }
+        }
+
+        bounds
+    };
+
     let mut rng = Pcg64::seed_from_u64(42);
     let a = 2.0;
 
     // initialize walkers
     let mut walkers = Vec::with_capacity(n_walkers);
-    for _ in 0..n_walkers {
+    for i in 0..n_walkers {
         let mut p = initial_guess;
-        for i in 0..4 {
-            p[i] *= 1.0 + 0.01 * rng.random::<f64>();
+        for s in 0..4 {
+            if LOG_SCALE[s] {
+                p[s] = p[s].log10()
+            }
+            p[s] *= 1.0 + 0.1 * (rng.random::<f64>() - 0.5);
         }
-        let lp = log_likelihood(p, data, y_error_bar, true, inwards);
+        let lp = log_likelihood(p, data, y_error_bar, true);
         walkers.push(Walker {
             params: p,
             log_prob: lp,
+            rng: Pcg64::seed_from_u64(42 + i as u64 * 7919),
         });
     }
 
-    let mut chain = Vec::new();
-    let mut likelihoods = Vec::new();
+    let mut chains = vec![Vec::new(); n_walkers];
+    let mut likelihoods = vec![Vec::new(); n_walkers];
 
     for step in 0..num_steps {
         stretch_move_parallel(
             &mut walkers,
-            &|p| log_likelihood(p, data, y_error_bar, true, inwards),
+            &|p| log_likelihood(p, data, y_error_bar, true),
             a,
+            &bounds,
         );
 
         if step >= burn_in {
-            for w in &walkers {
-                chain.push(w.params);
-                likelihoods.push(w.log_prob);
+            for w in 0..n_walkers {
+                chains[w].push(walkers[w].lin_params());
+                likelihoods[w].push(walkers[w].log_prob);
             }
         }
 
@@ -158,16 +153,30 @@ fn run_ensemble_sampler(
         }
     }
 
-    (chain, likelihoods)
+    let (combined_chain, combined_likelihoods) = combine_chains((chains, likelihoods));
+
+    // Best params
+    let best_idx = combined_likelihoods
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    let best_params = combined_chain[best_idx];
+
+    (best_params, combined_chain, combined_likelihoods)
 }
 
-pub fn combine_chains(chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)]) -> (Vec<[f64; 4]>, Vec<f64>) {
+pub fn combine_chains(
+    (chains, likelihoods): (Vec<Vec<[f64; 4]>>, Vec<Vec<f64>>),
+) -> (Vec<[f64; 4]>, Vec<f64>) {
     let mut combined_chain = Vec::new();
     let mut combined_likelihoods = Vec::new();
 
-    for (_, chain, likelihoods) in chains {
-        combined_chain.extend_from_slice(&chain);
-        combined_likelihoods.extend_from_slice(&likelihoods);
+    for c in 0..chains.len() {
+        combined_chain.extend_from_slice(&chains[c]);
+        combined_likelihoods.extend_from_slice(&likelihoods[c]);
     }
 
     (combined_chain, combined_likelihoods)
@@ -217,106 +226,13 @@ pub fn split_chains(
     result
 }
 
-fn find_parameters_mcmc_parallel(
-    data: &Vec<(f64, f64)>,
-    y_error_bar: &Vec<(f64, f64)>,
-    initial_guess: [f64; 4],
-    bounds: [(f64, f64); 4],
-    fix_tau: Option<f64>,
-    num_steps: usize,
-    burn_in: usize,
-    inwards: bool,
-    num_chains: usize,
-) -> (Vec<([f64; 4], Vec<[f64; 4]>, Vec<f64>)>, [f64; 4]) {
-    println!("Running {} parallel MCMC chains...", num_chains);
-
-    // Create a counter for progress reporting (optional)
-    let progress_counter = AtomicUsize::new(0);
-
-    let num_params = match inwards {
-        true => 3,
-        false => 4,
-    };
-
-    // Run chains in parallel
-    let chains: Vec<([f64; 4], Vec<[f64; 4]>, Vec<f64>)> = (0..num_chains)
-        .into_par_iter()
-        .map(|chain_id| {
-            // Create a unique seed for each chain
-            let seed = 42 + chain_id as u64 * 12345;
-            let mut rng = Pcg64::seed_from_u64(seed);
-
-            // Perturb initial guess slightly for each chain
-            let mut chain_initial_guess = initial_guess;
-            for i in 0..num_params {
-                if fix_tau.is_none() || i != 2 {
-                    // Add 10% random perturbation
-                    chain_initial_guess[i] *= 1.0 + 0.1 * (rng.random::<f64>() - 0.5);
-                }
-            }
-
-            // Run single chain
-            let (best_params, chain, likelihoods) = run_single_chain(
-                data,
-                y_error_bar,
-                chain_initial_guess,
-                bounds,
-                fix_tau,
-                num_steps,
-                burn_in,
-                inwards,
-                &mut rng,
-                chain_id,
-            );
-
-            // Update progress
-            let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            println!(
-                "Chain {} completed. Progress: {}/{}",
-                chain_id, completed, num_chains
-            );
-
-            (best_params, chain, likelihoods)
-        })
-        .collect();
-
-    // Find overall best parameters (from all chains)
-    let overall_best = find_overall_best(&chains);
-
-    (chains, overall_best)
-}
-
-fn find_overall_best(chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)]) -> [f64; 4] {
-    let mut best_log_likelihood = f64::NEG_INFINITY;
-    let mut best_params = [0.0; 4];
-
-    for (params, _, likelihoods) in chains {
-        if let Some(max_likelihood) = likelihoods.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
-            let log_likelihood = max_likelihood.ln();
-            if log_likelihood > best_log_likelihood {
-                best_log_likelihood = log_likelihood;
-                best_params = *params;
-            }
-        }
-    }
-
-    best_params
-}
-
-pub fn calculate_gelman_rubin(
-    chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
-    inwards: bool,
-) -> Vec<f64> {
+pub fn calculate_gelman_rubin(chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)]) -> Vec<f64> {
     let m = chains.len() as f64;
     let n = chains[0].1.len() as f64; // Samples per chain after burn-in
 
-    let num_params = match inwards {
-        true => 3,
-        false => 4,
-    };
-    let mut r_hat = vec![0.0; num_params];
+    let mut r_hat = vec![0.0; 4];
 
-    for param_idx in 0..num_params {
+    for param_idx in 0..4 {
         // Collect samples for this parameter
         let mut param_samples = Vec::new();
         for (_, chain, _) in chains {
@@ -355,201 +271,56 @@ pub fn calculate_gelman_rubin(
         let pooled_var = ((n - 1.0) / n) * within_var + between_var;
 
         // R-hat statistic (should approach 1.0 as chains converge)
-        r_hat[param_idx] = (pooled_var / within_var); //.sqrt();
+        r_hat[param_idx] = (pooled_var / within_var).sqrt();
     }
 
     r_hat
 }
 
-const LOG_SCALE: [bool; 4] = [true, false, false, true];
-const LOG_PRIOR: [bool; 4] = [true, false, false, true];
-#[derive(Clone, Copy)]
-struct Proposal {
-    params: [f64; 4],
-    log_jacobian: f64,
-    valid: bool,
-}
-
-fn propose(
-    current: &[f64; 4],
-    step_size: &[f64; 4],
-    bounds: &[(f64, f64); 4],
-    log_scale: &[bool; 4],
-    fix_tau: Option<f64>,
-    num_params: usize,
-    rng: &mut impl Rng,
-) -> Proposal {
-    let mut params = *current;
-    let mut log_jacobian = 0.0;
-
-    for i in 0..num_params {
-        // Handle fixed tau
-        if fix_tau.is_some() && i == 2 {
-            params[i] = fix_tau.unwrap();
-            continue;
-        }
-
-        let (cur_val, is_log) = if log_scale[i] {
-            (current[i].ln(), true)
-        } else {
-            (current[i], false)
-        };
-
-        let normal = Normal::new(cur_val, step_size[i]).unwrap();
-        let mut prop = normal.sample(rng);
-
-        if is_log {
-            prop = prop.exp();
-        }
-
-        // Jacobian to map log sampling back to linear prior
-        if !LOG_PRIOR[i] {
-            log_jacobian += prop.ln() - current[i].ln();
-        }
-
-        // Hard reject if OOB
-        if prop < bounds[i].0 || prop > bounds[i].1 {
-            return Proposal {
-                params: *current,
-                log_jacobian: 0.0,
-                valid: false,
-            };
-        }
-
-        params[i] = prop;
-    }
-
-    Proposal {
-        params,
-        log_jacobian,
-        valid: true,
-    }
-}
-
-fn run_single_chain(
+const NAMES: [&str; 4] = ["m200", "c200", "tau", "rho_c"];
+pub fn likelihood_slice_profile(
     data: &Vec<(f64, f64)>,
     y_error_bar: &Vec<(f64, f64)>,
-    initial_guess: [f64; 4], // m200, c200, tau rho_c
-    bounds: [(f64, f64); 4],
-    fix_tau: Option<f64>,
-    num_steps: usize,
-    burn_in: usize,
-    inwards: bool,
-    rng: &mut impl Rng,
-    chain_id: usize,
-) -> ([f64; 4], Vec<[f64; 4]>, Vec<f64>) {
-    let mut current_params = initial_guess;
-    let mut current_log_likelihood =
-        log_likelihood(current_params, data, y_error_bar, true, inwards);
-
-    let mut accepted = 0;
-    let mut chain = Vec::with_capacity(num_steps);
-    let mut likelihoods = Vec::with_capacity(num_steps);
-
-    let mut acceptance_history = vec![false; burn_in];
-
-    let num_params = match inwards {
-        true => 3,
-        false => 4,
-    };
-
-    let mut step_size: [f64; 4] = [0.0; 4];
-    for i in 0..4 {
-        if LOG_SCALE[i] {
-            step_size[i] = 0.01 * initial_guess[i].ln()
-        } else {
-            step_size[i] = 0.01
-        }
-    }
-
-    for step in 0..num_steps {
-        // Propose new parameters
-        let proposal = propose(
-            &current_params,
-            &step_size,
-            &bounds,
-            &LOG_SCALE,
-            fix_tau,
-            num_params,
-            rng,
-        );
-
-        // Calculate log likelihood for proposed parameters
-        let proposed_log_likelihood =
-            log_likelihood(proposal.params, data, y_error_bar, true, inwards);
-
-        // Metropolis-Hast acceptance ratio
-        let log_acceptance =
-            proposed_log_likelihood - current_log_likelihood + proposal.log_jacobian;
-
-        if proposal.valid && (log_acceptance >= 0.0 || rng.random::<f64>() < log_acceptance.exp()) {
-            current_params = proposal.params;
-            current_log_likelihood = proposed_log_likelihood;
-            accepted += 1;
-
-            if step < burn_in {
-                acceptance_history[step] = true;
+    anchor_point: [f64; 4],
+    slice_idx: usize,
+    bounds: [f64; 2],
+) {
+    const N: usize = 100;
+    let mut x_range = Vec::with_capacity(N);
+    let mut likelihoods = Vec::with_capacity(N);
+    for n in 0..N {
+        let x = match LOG_SCALE[slice_idx] {
+            true => {
+                (bounds[0].ln() + (n as f64 / N as f64) * (bounds[1].ln() - bounds[0].ln())).exp()
             }
-        }
-        // Adjust step
-        const TARGET_RATIO: f64 = 0.234; //Roberts, G. O., Gelman, A., & Gilks, W. R. (1997)
-        if step % 10 == 0 && step < burn_in {
-            let acceptance_rate = acceptance_history[step.saturating_sub(100)..]
-                .iter()
-                .filter(|&&b| b)
-                .count() as f64
-                / (step - step.saturating_sub(100)) as f64;
-            // Target acceptance rate between 0.4 and 0.6
-            for i in 0..num_params {
-                if acceptance_rate < TARGET_RATIO {
-                    step_size[i] *= 0.99
-                } else if acceptance_rate > TARGET_RATIO {
-                    step_size[i] *= 1.01
-                }
+            false => bounds[0] + (n as f64 / N as f64) * (bounds[1] - bounds[0]),
+        };
+
+        let mut params = anchor_point.clone();
+        params[slice_idx] = x;
+        for s in 0..4 {
+            if LOG_SCALE[s] {
+                params[s] = params[s].log10();
             }
         }
 
-        // Store after burn-in period
-        if step >= burn_in {
-            chain.push(current_params);
-            likelihoods.push(current_log_likelihood.exp()); // Convert back from log
-        }
+        let likelihood = log_likelihood(params, data, y_error_bar, true);
 
-        // Optional: Print progress
-        if step % 1000 == 0 {
-            println!(
-                "Chain {}: Step {}/{}: Accepted rate: {:.2}%, LogLik: {:.4} \nStep sizes: {}, {}, {}, {}",
-                chain_id,
-                step,
-                num_steps,
-                (accepted as f64 / (step + 1) as f64) * 100.0,
-                current_log_likelihood,
-                step_size[0],
-                step_size[1],
-                step_size[2],
-                step_size[3],
-            );
-        }
+        x_range.push(x);
+        likelihoods.push(likelihood);
     }
 
-    // Find best parameters (maximum likelihood)
-    let best_idx = likelihoods
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(idx, _)| idx)
-        .unwrap_or(0);
-
-    let best_params = chain[best_idx];
-
-    println!(
-        "Chain {} finished: Acceptance: {:.1}%, Best log-likelyhood: {:.4}",
-        chain_id,
-        (accepted as f64 / num_steps as f64) * 100.0,
-        likelihoods[best_idx].ln()
-    );
-
-    (best_params, chain, likelihoods)
+    plot_function(
+        &x_range,
+        &likelihoods,
+        "likelihood_profile.png",
+        "Likelihood Profile",
+        NAMES[slice_idx],
+        "log likelihood",
+        None,
+        None,
+    )
+    .unwrap()
 }
 
 pub fn find_parameters_gradient_descent(
@@ -623,19 +394,36 @@ fn log_likelihood(
     data: &Vec<(f64, f64)>,
     y_error_bar: &Vec<(f64, f64)>,
     m200_input: bool,
-    inwards: bool,
 ) -> f64 {
+    // undo log scale and compute jacobian
+    let mut log_jacobian = 0.0;
+    for s in 0..4 {
+        if LOG_SCALE[s] {
+            params[s] = 10.0_f64.powf(params[s]);
+
+            // J = |dp/dlogp| = d/dx(10^x) = 10^x ln(10) = p ln(10)
+            // ln(J) = ln(p) + const
+            // log_jacobian += params[s].ln();
+        }
+    }
+
+    let mut mcr_prior = 0.0;
     if m200_input {
         // recieved as m200, c200, tau, rho_c
+
+        // compute prior biases from mass-concetration-relation
+        let (mean_log10c, sigma_log10c) =
+            mass_concentration_relation(params[0], McrSource::DuttonMaccio2014);
+        let log10c = params[1].log10();
+        mcr_prior = -0.5 * ((log10c - mean_log10c) / sigma_log10c).powi(2);
+
+        // translate params
         (params[1], params[0]) = m200_c200_to_rs_rhos(params[0], params[1]);
+    } else {
+        // No implemented Mcr prior for rho_s r_s space.
     }
 
     let halo = Halo::NFW(params[0], params[1]);
-
-    let rho_c = match inwards {
-        true => None,
-        false => Some(params[3]),
-    };
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let fit = isothermal_core_collapse_background(
@@ -643,11 +431,12 @@ fn log_likelihood(
         params[0],
         params[1],
         params[2],
-        rho_c,
+        Some(params[3]),
         (0.1 * data[0].0, halo.r_crit()),
         false,
     );
 
+    // compute X^2
     let mut chi_squared = 0.0;
     let mut sum_ln_sigma = 0.0;
     for i in 0..data.len() {
@@ -673,7 +462,7 @@ fn log_likelihood(
         sum_ln_sigma += spread.ln();
     }
 
-    -0.5 * chi_squared - sum_ln_sigma
+    -0.5 * chi_squared - sum_ln_sigma + mcr_prior + log_jacobian
 }
 
 fn get_rms_err_of_fit(

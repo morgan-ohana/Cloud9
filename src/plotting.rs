@@ -29,6 +29,15 @@ pub fn plot_function(
                     y_min = data_points[i].1
                 }
             }
+
+            // for i in 0..y_points.len() {
+            //     if y_points[i] > y_max {
+            //         y_max = y_points[i]
+            //     }
+            //     if y_points[i] < y_min {
+            //         y_min = y_points[i]
+            //     }
+            // }
         }
         None => {
             for i in 0..y_points.len() {
@@ -128,7 +137,7 @@ pub fn create_chain_trace_plots(
     use plotters::prelude::*;
 
     for (chain_id, (_, chain, _)) in chains.iter().enumerate() {
-        let filename = format!("trace_plots/chain_{}_trace.png", chain_id);
+        let filename = format!("figures/trace_plots/chain_{}_trace.png", chain_id);
         let root = BitMapBackend::new(&filename, (1200, 800)).into_drawing_area();
         root.fill(&WHITE)?;
 
@@ -216,18 +225,12 @@ pub fn create_corner_plot(
     marked_points: &[&[f64; 4]],
     param_names: &[&str; 4],
     output_path: &str,
-    inwards: bool,
     bounds: &[[f64; 2]; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let num_params = match inwards {
-        true => 3,
-        false => 4,
-    };
-
     // Extract parameter columns
-    let mut params: Vec<Vec<f64>> = vec![Vec::new(); num_params];
+    let mut params: Vec<Vec<f64>> = vec![Vec::new(); 4];
     for point in chain {
-        for i in 0..num_params {
+        for i in 0..4 {
             params[i].push(point[i]);
         }
     }
@@ -254,6 +257,7 @@ pub fn create_corner_plot(
         .split_by_breakpoints(x_break_points, y_break_points);
     //.split_evenly((num_params, num_params));
 
+    let num_params = 4;
     // Plot each cell
     for row in 0..num_params {
         for col in 0..num_params {

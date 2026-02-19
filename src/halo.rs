@@ -134,6 +134,37 @@ pub fn rs_rhos_to_m200_c200(r_s: f64, rho_s: f64) -> (f64, f64) {
     (m200, c200)
 }
 
+pub enum McrSource {
+    DuttonMaccio2014,
+    DiemerJoyce2019,
+}
+
+pub fn mass_concentration_relation(m200: f64, source: McrSource) -> (f64, f64) {
+    match source {
+        McrSource::DuttonMaccio2014 => {
+            // Dutton & Maccio 2014, z=0
+
+            let a = 0.905;
+            let b = -0.101;
+            let sigma_log10c = 0.11; // intrinsic scatter
+
+            let log10m = (m200 * HH / 1e12).log10();
+            let mean_log10c = a + b * log10m;
+
+            (mean_log10c, sigma_log10c)
+        }
+        McrSource::DiemerJoyce2019 => {
+            todo!();
+
+            // Diemer & Joyce 2019, z=0
+
+            let delta_c = 1.686;
+            // let sigma_m = ;
+            // let nu = delta_c / sigma_m;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
