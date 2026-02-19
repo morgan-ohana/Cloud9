@@ -708,6 +708,72 @@ fn plot_kde(
     Ok(())
 }
 
+fn gaussian_kernel(sigma: f64) -> Vec<f64> {
+    let radius = (3.0 * sigma).ceil() as isize;
+    let mut kernel = Vec::new();
+    let mut sum = 0.0;
+
+    for i in -radius..=radius {
+        let x = i as f64;
+        let v = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel.push(v);
+        sum += v;
+    }
+
+    for v in kernel.iter_mut() {
+        *v /= sum;
+    }
+
+    kernel
+}
+
+fn blur_x(field: &Vec<Vec<f64>>, sigma: f64) -> Vec<Vec<f64>> {
+    let kernel = gaussian_kernel(sigma);
+    let r = (kernel.len() / 2) as isize;
+    let n = field.len();
+    let m = field[0].len();
+
+    let mut out = vec![vec![0.0; m]; n];
+
+    for i in 0..n {
+        for j in 0..m {
+            let mut sum = 0.0;
+            for k in -r..=r {
+                let jj = (j as isize + k).clamp(0, (m - 1) as isize) as usize;
+                sum += field[i][jj] * kernel[(k + r) as usize];
+            }
+            out[i][j] = sum;
+        }
+    }
+    out
+}
+
+fn blur_y(field: &Vec<Vec<f64>>, sigma: f64) -> Vec<Vec<f64>> {
+    let kernel = gaussian_kernel(sigma);
+    let r = (kernel.len() / 2) as isize;
+    let n = field.len();
+    let m = field[0].len();
+
+    let mut out = vec![vec![0.0; m]; n];
+
+    for i in 0..n {
+        for j in 0..m {
+            let mut sum = 0.0;
+            for k in -r..=r {
+                let ii = (i as isize + k).clamp(0, (n - 1) as isize) as usize;
+                sum += field[ii][j] * kernel[(k + r) as usize];
+            }
+            out[i][j] = sum;
+        }
+    }
+    out
+}
+
+fn gaussian_smooth(field: &Vec<Vec<f64>>, sigma: f64) -> Vec<Vec<f64>> {
+    let tmp = blur_x(field, sigma);
+    blur_y(&tmp, sigma)
+}
+
 fn plot_2d_contours(
     area: &DrawingArea<SVGBackend, Shift>,
     x_data: &[f64],
@@ -719,7 +785,7 @@ fn plot_2d_contours(
     (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Simple 2D density estimation
-    let grid_size = 50;
+    let grid_size = 100;
 
     let mut density = vec![vec![0.0; grid_size]; grid_size];
     let mut edges = vec![vec![(0.0, 0.0); grid_size + 1]; grid_size + 1];
@@ -781,7 +847,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
         }
         (true, false) => {
             let mut chart = ChartBuilder::on(area)
@@ -789,7 +855,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
         }
         (false, true) => {
             let mut chart = ChartBuilder::on(area)
@@ -797,7 +863,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
         }
         (false, false) => {
             let mut chart = ChartBuilder::on(area)
@@ -805,7 +871,7 @@ fn plot_2d_contours(
                 .margin_bottom(LABEL_WIDTH)
                 .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-            draw_contour_content(&mut chart, &density, &edges, grid_size, (row, col))?;
+            draw_contour_content(&mut chart, &density, &edges, grid_size)?;
         }
     }
 
@@ -820,8 +886,9 @@ fn draw_contour_content(
     density: &Vec<Vec<f64>>,
     edges: &Vec<Vec<(f64, f64)>>,
     grid_size: usize,
-    (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let density = gaussian_smooth(&density, 1.0);
+
     let mut cells = Vec::with_capacity(grid_size.pow(2));
     for i in 0..grid_size {
         for j in 0..grid_size {
@@ -837,41 +904,274 @@ fn draw_contour_content(
     cells.sort_by(|cell_a, cell_b| cell_b.0.partial_cmp(&cell_a.0).unwrap());
 
     const CONTOUR_LEVELS: [f64; 5] = [0.118, 0.393, 0.675, 0.864, 0.956]; //[0.5, 1, 1.5, 2, 2.5] sigma for 2D gaussian
+    let contour_colors = [
+        RGBColor(255, 100, 100),
+        RGBColor(255, 200, 100),
+        RGBColor(100, 255, 200),
+        RGBColor(100, 200, 255),
+        RGBColor(100, 100, 255),
+    ];
+    let mut cumulative_probabilities = vec![vec![0.0; grid_size]; grid_size];
     let mut cumulative_probability = 0.0;
-    let mut levels = vec![vec![0; grid_size]; grid_size];
+    let mut levels = vec![vec![CONTOUR_LEVELS.len(); grid_size]; grid_size];
+    let mut density_levels = [1.0; 5];
 
     for cell in cells {
         cumulative_probability += cell.0;
+        cumulative_probabilities[cell.3.0][cell.3.1] = cumulative_probability;
 
-        let color = if cumulative_probability <= CONTOUR_LEVELS[0] {
-            levels[cell.3.0][cell.3.1] = 0;
-            RGBColor(255, 100, 100) // Red
-        } else if cumulative_probability <= CONTOUR_LEVELS[1] {
-            levels[cell.3.0][cell.3.1] = 1;
-            RGBColor(255, 200, 100) // Orange
-        } else if cumulative_probability <= CONTOUR_LEVELS[2] {
-            levels[cell.3.0][cell.3.1] = 2;
-            RGBColor(100, 255, 200) // Cyan
-        } else if cumulative_probability <= CONTOUR_LEVELS[3] {
-            levels[cell.3.0][cell.3.1] = 3;
-            RGBColor(100, 200, 255) // Light Blue
-        } else if cumulative_probability <= CONTOUR_LEVELS[4] {
-            levels[cell.3.0][cell.3.1] = 4;
-            RGBColor(100, 100, 255) // Blue
-        } else {
-            levels[cell.3.0][cell.3.1] = 5;
-            continue;
-        };
+        let mut color_opt = None;
+        for i in 0..CONTOUR_LEVELS.len() {
+            if cumulative_probability <= CONTOUR_LEVELS[i] {
+                levels[cell.3.0][cell.3.1] = i;
+                density_levels[i] = cell.0;
+                color_opt = Some(contour_colors[i]);
+                break;
+            }
+        }
 
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [cell.1, cell.2],
-            color.mix(0.3).filled(),
-        )))?;
+        if let Some(color) = color_opt {
+            chart.draw_series(std::iter::once(Rectangle::new(
+                [cell.1, cell.2],
+                color.mix(0.3).filled(),
+            )))?;
+        }
     }
 
     // Draw contours
-    draw_contour_around_level(chart, 1, &levels, edges, grid_size, (row, col))?;
-    draw_contour_around_level(chart, 3, &levels, edges, grid_size, (row, col))?;
+    draw_contours(chart, density_levels[1], &density, edges, grid_size)?;
+    draw_contours(chart, density_levels[3], &density, edges, grid_size)?;
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct Pt(f64, f64);
+
+impl PartialEq for Pt {
+    fn eq(&self, other: &Self) -> bool {
+        (self.0 - other.0).hypot(self.1 - other.1) < 1e-9
+    }
+}
+
+impl Pt {
+    fn normalize(&self, x_bounds: (f64, f64), y_bounds: (f64, f64)) -> Self {
+        Pt(
+            (self.0 - x_bounds.0) / (x_bounds.1 - x_bounds.0),
+            (self.1 - y_bounds.0) / (y_bounds.1 - y_bounds.0),
+        )
+    }
+}
+
+fn interpolate(p1: Pt, p2: Pt, v1: f64, v2: f64, level: f64) -> Pt {
+    let t = (level - v1) / (v2 - v1);
+    Pt(p1.0 + t * (p2.0 - p1.0), p1.1 + t * (p2.1 - p1.1))
+}
+
+fn cell_to_vertex(levels: &Vec<Vec<f64>>, grid_size: usize) -> Vec<Vec<f64>> {
+    let mut v = vec![vec![0.0; grid_size + 1]; grid_size + 1];
+
+    // Intentionally avoid looping over edge verticies to leave them at 0
+    for i in 1..grid_size {
+        for j in 1..grid_size {
+            let mut sum = 0.0;
+            let mut count: f64 = 0.0;
+
+            // ---------------------
+            // |         |         |
+            // | (i-1,j) |  (i,j)  |
+            // |         |         |
+            // --------(i,j)--------
+            // |         |         |
+            // |(i-1,j-1)| (i,j-1) |
+            // |         |         |
+            // ---------------------
+
+            for di in [-1, 0] {
+                for dj in [-1, 0] {
+                    let ci = i as isize + di;
+                    let cj = j as isize + dj;
+                    if ci >= 0 && cj >= 0 && ci < grid_size as isize && cj < grid_size as isize {
+                        sum += levels[ci as usize][cj as usize];
+                        count += 1.0;
+                    }
+                }
+            }
+
+            v[i][j] = sum / count;
+        }
+    }
+
+    v
+}
+
+fn marching_squares(
+    levels: &Vec<Vec<f64>>,
+    edges: &Vec<Vec<(f64, f64)>>,
+    level: f64,
+    grid_size: usize,
+) -> Vec<(Pt, Pt)> {
+    let mut segments = Vec::new();
+    let level = level as f64;
+
+    for i in 0..grid_size {
+        for j in 0..grid_size {
+            let v00 = levels[i][j];
+            let v10 = levels[i + 1][j];
+            let v01 = levels[i][j + 1];
+            let v11 = levels[i + 1][j + 1];
+
+            let mut mask = 0;
+            if v00 > level {
+                mask |= 1;
+            }
+            if v10 > level {
+                mask |= 2;
+            }
+            if v11 > level {
+                mask |= 4;
+            }
+            if v01 > level {
+                mask |= 8;
+            }
+
+            if mask == 0 || mask == 15 {
+                continue;
+            }
+
+            let p00 = Pt(edges[i][j].0, edges[i][j].1);
+            let p10 = Pt(edges[i + 1][j].0, edges[i + 1][j].1);
+            let p01 = Pt(edges[i][j + 1].0, edges[i][j + 1].1);
+            let p11 = Pt(edges[i + 1][j + 1].0, edges[i + 1][j + 1].1);
+
+            let mut edge_points = Vec::new();
+
+            if (v00 > level) != (v10 > level) {
+                edge_points.push(interpolate(p00, p10, v00, v10, level));
+            }
+            if (v10 > level) != (v11 > level) {
+                edge_points.push(interpolate(p10, p11, v10, v11, level));
+            }
+            if (v11 > level) != (v01 > level) {
+                edge_points.push(interpolate(p11, p01, v11, v01, level));
+            }
+            if (v01 > level) != (v00 > level) {
+                edge_points.push(interpolate(p01, p00, v01, v00, level));
+            }
+
+            if mask == 5 || mask == 10 {
+                // Use asymptotic decider
+                let center = (v00 + v10 + v01 + v11) / 4.0;
+                if center > level {
+                    // connect high-valued corners
+                    if mask == 5 {
+                        edge_points = vec![
+                            interpolate(p00, p01, v00, v01, level),
+                            interpolate(p10, p11, v10, v11, level),
+                        ];
+                    } else {
+                        edge_points = vec![
+                            interpolate(p00, p10, v00, v10, level),
+                            interpolate(p01, p11, v01, v11, level),
+                        ];
+                    }
+                } else {
+                    // connect low-valued corners
+                    if mask == 5 {
+                        edge_points = vec![
+                            interpolate(p00, p10, v00, v10, level),
+                            interpolate(p01, p11, v01, v11, level),
+                        ];
+                    } else {
+                        edge_points = vec![
+                            interpolate(p00, p01, v00, v01, level),
+                            interpolate(p10, p11, v10, v11, level),
+                        ];
+                    }
+                }
+            }
+
+            segments.push((edge_points[0], edge_points[1]));
+        }
+    }
+
+    segments
+}
+
+fn stitch_segments(
+    segments: &Vec<(Pt, Pt)>,
+    x_bounds: (f64, f64),
+    y_bounds: (f64, f64),
+) -> Vec<Vec<Pt>> {
+    let mut loops = Vec::new();
+    let mut unused = segments.clone();
+
+    while let Some((start, end)) = unused.pop() {
+        let mut loop_pts = vec![start, end];
+
+        loop {
+            let last = *loop_pts.last().unwrap();
+            let norm_last = last.normalize(x_bounds, y_bounds);
+            let mut found = None;
+
+            for (k, (a, b)) in unused.iter().enumerate() {
+                let norm_a = a.normalize(x_bounds, y_bounds);
+                let norm_b = b.normalize(x_bounds, y_bounds);
+
+                if norm_a == norm_last {
+                    found = Some((k, *b));
+                    break;
+                } else if norm_b == norm_last {
+                    found = Some((k, *a));
+                    break;
+                }
+            }
+
+            if let Some((idx, next)) = found {
+                unused.swap_remove(idx);
+                if next == loop_pts[0] {
+                    break;
+                }
+                loop_pts.push(next);
+            } else {
+                break;
+            }
+        }
+
+        loops.push(loop_pts);
+    }
+
+    loops
+}
+
+fn draw_contours(
+    chart: &mut ChartContext<
+        SVGBackend,
+        Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
+    >,
+    level: f64,
+    levels: &Vec<Vec<f64>>,
+    edges: &Vec<Vec<(f64, f64)>>,
+    grid_size: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let levels = cell_to_vertex(levels, grid_size);
+    let segments = marching_squares(&levels, edges, level, grid_size);
+    let loops = stitch_segments(
+        &segments,
+        (edges[0][0].0, edges[grid_size][grid_size].0),
+        (edges[0][0].1, edges[grid_size][grid_size].1),
+    );
+
+    for loop_pts in loops {
+        if loop_pts.len() < 3 {
+            continue;
+        }
+
+        let mut pts: Vec<(f64, f64)> = loop_pts.iter().map(|p| (p.0, p.1)).collect();
+        pts.push(pts[0]); // close loop
+
+        chart.draw_series(std::iter::once(PathElement::new(pts, &BLACK)))?;
+    }
 
     Ok(())
 }
