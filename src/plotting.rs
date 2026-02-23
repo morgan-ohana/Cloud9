@@ -1,16 +1,19 @@
 use plotters::coord::Shift;
 use plotters::coord::ranged1d::ValueFormatter;
+use plotters::element::DashedPathElement;
 use plotters::prelude::*;
 
-pub fn plot_function(
+pub fn plot_functions(
     x_points: &Vec<f64>,
-    y_points: &Vec<f64>,
+    y_points: &Vec<Vec<f64>>,
     filename: &str,
     title: &str,
     xlabel: &str,
     ylabel: &str,
-    legend: Option<String>,
+    legends: Vec<Option<String>>,
+    dashed: Vec<bool>,
     data: Option<&Vec<(f64, f64)>>,
+    data_y_err: Option<&Vec<(f64, f64)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     //let root = BitMapBackend::new(filename, (1024, 768)).into_drawing_area();
     let root = SVGBackend::new(filename, (1024, 768)).into_drawing_area();
@@ -18,6 +21,11 @@ pub fn plot_function(
 
     let mut y_min = f64::MAX;
     let mut y_max = f64::MIN;
+
+    let x_range = match data {
+        Some(data_points) => 0.9 * data_points[0].0..1.1 * data_points.last().unwrap().0,
+        None => x_points[0]..x_points[x_points.len() - 1],
+    };
 
     match data {
         Some(data_points) => {
@@ -30,35 +38,35 @@ pub fn plot_function(
                 }
             }
 
-            // for i in 0..y_points.len() {
-            //     if y_points[i] > y_max {
-            //         y_max = y_points[i]
-            //     }
-            //     if y_points[i] < y_min {
-            //         y_min = y_points[i]
-            //     }
-            // }
+            for n in 0..y_points.len() {
+                for i in 0..y_points[n].len() {
+                    if !x_range.contains(&x_points[i]) {
+                        continue;
+                    }
+                    if y_points[n][i] > y_max {
+                        y_max = y_points[n][i]
+                    }
+                    if y_points[n][i] < y_min {
+                        y_min = y_points[n][i]
+                    }
+                }
+            }
         }
         None => {
-            for i in 0..y_points.len() {
-                if y_points[i] > y_max {
-                    y_max = y_points[i]
-                }
-                if y_points[i] < y_min {
-                    y_min = y_points[i]
+            for n in 0..y_points.len() {
+                for i in 0..y_points[n].len() {
+                    if y_points[n][i] > y_max {
+                        y_max = y_points[n][i]
+                    }
+                    if y_points[n][i] < y_min {
+                        y_min = y_points[n][i]
+                    }
                 }
             }
         }
     }
 
     //println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
-
-    let x_range = match data {
-        Some(data_points) => 0.9 * data_points[0].0..1.1 * data_points.last().unwrap().0,
-        None => x_points[0]..x_points[x_points.len() - 1],
-    };
-
-    let x_range = x_range.log_scale();
 
     let y_range = (y_min + 1e-4)
         * match y_min.signum() {
@@ -73,6 +81,7 @@ pub fn plot_function(
                 _ => panic!("number has no sign, is probably NaN"),
             };
 
+    let x_range = x_range.log_scale();
     let y_range = y_range.log_scale();
 
     let mut chart = ChartBuilder::on(&root)
@@ -102,28 +111,106 @@ pub fn plot_function(
         })
         .draw()?;
 
-    let plot_profile: Vec<(f64, f64)> = (0..x_points.len())
-        .map(|i| (x_points[i], y_points[i]))
-        .collect();
+    let mut plot_profiles: Vec<Vec<(f64, f64)>> = Vec::with_capacity(y_points.len());
+    for n in 0..y_points.len() {
+        plot_profiles.push(
+            (0..x_points.len())
+                .map(|i| (x_points[i], y_points[n][i]))
+                .collect(),
+        );
+    }
 
-    if let Some(legend_text) = legend {
-        chart
-            .draw_series(LineSeries::new(plot_profile, &BLUE))?
-            .label(legend_text);
+    let dashed_count = dashed.iter().filter(|&&d| d).count().max(1);
+    let mut dashed_index = 0;
+    let mut make_legend = false;
+    for n in 0..y_points.len() {
+        let color = if dashed[n] {
+            let t = dashed_index as f64 / (dashed_count - 1).max(1) as f64;
+
+            // Simple linear gradient: BLUE → RED
+            let r = (255.0 * t) as u8;
+            let g = 0;
+            let b = (255.0 * (1.0 - t)) as u8;
+
+            dashed_index += 1;
+
+            RGBColor(r, g, b)
+        } else {
+            BLACK
+        };
+
+        let series = if dashed[n] {
+            chart.draw_series(DashedLineSeries::new(
+                plot_profiles[n].clone(),
+                10,
+                10,
+                ShapeStyle {
+                    color: color.mix(1.0),
+                    filled: false,
+                    stroke_width: 1,
+                },
+            ))?
+        } else {
+            chart.draw_series(LineSeries::new(plot_profiles[n].clone(), &color))?
+        };
+
+        if let Some(legend_text) = &legends[n] {
+            series.label(legend_text).legend(move |(x, y)| {
+                PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    ShapeStyle {
+                        color: color.mix(1.0),
+                        filled: false,
+                        stroke_width: 2,
+                    },
+                )
+            });
+
+            make_legend = true
+        }
+    }
+    if make_legend {
         // Configure and draw legend
         chart
             .configure_series_labels()
+            .position(SeriesLabelPosition::UpperRight)
             .background_style(&WHITE.mix(0.8))
             .border_style(&BLACK)
             .draw()?;
-    } else {
-        chart.draw_series(LineSeries::new(plot_profile, &BLUE))?;
     }
 
     if let Some(data_points) = data {
         chart
             .draw_series(data_points.iter().map(|point| Circle::new(*point, 5, &RED)))
             .unwrap();
+    }
+
+    if let (Some(data_points), Some(y_err)) = (data, data_y_err) {
+        assert_eq!(data_points.len(), y_err.len());
+
+        let cap_width = 0.02; // fraction of x in log space (tweak this)
+
+        chart.draw_series(
+            data_points
+                .iter()
+                .zip(y_err.iter())
+                .map(|(&(x, _y), &(yl, yh))| {
+                    let mut elems = Vec::new();
+
+                    // Vertical error bar
+                    elems.push(PathElement::new(vec![(x, yl), (x, yh)], &RED));
+
+                    // Horizontal caps (log-scale friendly multiplicative width)
+                    let x_left = x * (1.0 - cap_width);
+                    let x_right = x * (1.0 + cap_width);
+
+                    elems.push(PathElement::new(vec![(x_left, yl), (x_right, yl)], &RED));
+                    elems.push(PathElement::new(vec![(x_left, yh), (x_right, yh)], &RED));
+
+                    elems
+                })
+                .flatten(),
+        )?;
     }
 
     root.present()?;
@@ -323,10 +410,11 @@ fn plot_histogram(
     // let min = data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     // let max = data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-    let n_bins = 50;
+    let n_bins = 500;
     let edges = {
         match LOG_SCALE[row] {
             true => {
+                assert!(min > 0.0, "Cannot use log scale for non-positive values");
                 let mut edges = vec![0.0; n_bins + 1];
                 for i in 0..n_bins + 1 {
                     let t = (i as f64) / (n_bins as f64);
@@ -349,20 +437,31 @@ fn plot_histogram(
         true => (max.ln() - min.ln()) / (n_bins as f64),
         false => (max - min) / (n_bins as f64),
     };
+
     let mut bins: Vec<u32> = vec![0; n_bins];
 
+    let mut counts = 0;
     for &value in data {
-        if value >= max || value <= min {
-            continue;
-        }
         let bin_idx = match LOG_SCALE[row] {
             true => ((value.ln() - min.ln()) / spacing).floor() as usize,
             false => ((value - min) / spacing).floor() as usize,
         };
+
+        if bin_idx >= n_bins {
+            continue; // Skip out-of-range values
+        }
+
         bins[bin_idx] += 1;
+        counts += 1;
     }
 
-    let max_count = *bins.iter().max().unwrap() as f64;
+    let mut density = vec![0.0; n_bins];
+    let mut max_density: f64 = 0.0;
+    for i in 0..bins.len() {
+        let width = edges[i + 1] - edges[i];
+        density[i] = bins[i] as f64 / (counts as f64 * width);
+        max_density = max_density.max(density[i]);
+    }
 
     // Create chart for histogram
     let mut chart_builder = ChartBuilder::on(area);
@@ -383,41 +482,44 @@ fn plot_histogram(
         true => {
             let mut chart = chart_builder
                 //.caption(param_name, ("sans-serif", 15).into_font())
-                .build_cartesian_2d((min..max).log_scale(), 0.0..max_count * 1.1)?;
+                .build_cartesian_2d((min..max).log_scale(), 0.0..max_density * 1.1)?;
 
-            draw_hist_content(&mut chart, param_name, &bins, &edges)?;
+            draw_hist_content(&mut chart, param_name, &density, &max_density, &edges)?;
 
             // Draw marked values with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
             for (i, &marked_value) in marked_values.iter().enumerate() {
                 let color = colors[i % colors.len()];
                 chart.draw_series(std::iter::once(PathElement::new(
-                    vec![(marked_value, 0.0), (marked_value, max_count * 1.1)],
+                    vec![(marked_value, 0.0), (marked_value, max_density * 1.1)],
                     color,
                 )))?;
             }
+
+            // Add KDE curve
+            plot_kde(&mut chart, data, min, max, LOG_SCALE[row])?;
         }
         false => {
             let mut chart = chart_builder
                 //.caption(param_name, ("sans-serif", 15).into_font())
-                .build_cartesian_2d(min..max, 0.0..max_count * 1.1)?;
+                .build_cartesian_2d(min..max, 0.0..max_density * 1.1)?;
 
-            draw_hist_content(&mut chart, param_name, &bins, &edges)?;
+            draw_hist_content(&mut chart, param_name, &density, &max_density, &edges)?;
 
             // Draw marked values with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
             for (i, &marked_value) in marked_values.iter().enumerate() {
                 let color = colors[i % colors.len()];
                 chart.draw_series(std::iter::once(PathElement::new(
-                    vec![(marked_value, 0.0), (marked_value, max_count * 1.1)],
+                    vec![(marked_value, 0.0), (marked_value, max_density * 1.1)],
                     color,
                 )))?;
             }
+
+            // Add KDE curve
+            plot_kde(&mut chart, data, min, max, LOG_SCALE[row])?;
         }
     };
-
-    // Add KDE curve
-    plot_kde(area, data, min, max, (row, col), LOG_SCALE[row])?;
 
     Ok(())
 }
@@ -428,13 +530,14 @@ fn draw_hist_content<
 >(
     chart: &mut ChartContext<SVGBackend, Cartesian2d<X, Y>>,
     param_name: &str,
-    bins: &Vec<u32>,
+    density: &Vec<f64>,
+    max_density: &f64,
     edges: &Vec<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     chart
         .configure_mesh()
         .x_desc(param_name) // X-axis label
-        .y_desc("Counts") // Y-axis label
+        .y_desc("Probability Density") // Y-axis label
         .x_label_formatter(&|x| {
             if x.abs() >= 1000.0 || x.abs() <= 0.01 {
                 format!("{:.1e}", x)
@@ -452,14 +555,70 @@ fn draw_hist_content<
         .draw()?;
 
     // Plot histogram bars
-    for i in 0..bins.len() {
-        let count = bins[i] as f64;
+    let mut bins = Vec::with_capacity(density.len());
+    for i in 0..density.len() {
+        let count = density[i];
 
         chart.draw_series(std::iter::once(Rectangle::new(
             [(edges[i], 0.0), (edges[i + 1], count)],
             BLUE.mix(0.5).filled(),
         )))?;
+
+        bins.push((i, density[i]));
     }
+
+    bins.sort_by(|bin_a, bin_b| bin_b.1.partial_cmp(&bin_a.1).unwrap());
+
+    let mode_idx = bins[0].0;
+
+    let mut cumulative_probability = 0.0;
+    let mut included_indices = Vec::new();
+    for i in 0..bins.len() {
+        let idx = bins[i].0;
+        cumulative_probability += density[idx] * (edges[idx + 1] - edges[idx]);
+        included_indices.push(idx);
+        if cumulative_probability > 0.6827 {
+            break;
+        }
+    }
+
+    included_indices.sort();
+
+    let (left_idx, right_idx) = (
+        included_indices[0],
+        included_indices[included_indices.len() - 1],
+    );
+
+    let mut sixty_eight_percent = 0.0;
+    for i in left_idx..=right_idx {
+        sixty_eight_percent += density[i] * (edges[i + 1] - edges[i]);
+    }
+    dbg!(sixty_eight_percent);
+
+    // get positions of edges that bracket 1-sigma interval
+    let left_edge = 0.5 * (edges[left_idx] + edges[left_idx + 1]);
+    let right_edge = 0.5 * (edges[right_idx] + edges[right_idx + 1]);
+
+    let mode_point = 0.5 * (edges[mode_idx] + edges[mode_idx + 1]);
+
+    chart.draw_series(std::iter::once(PathElement::new(
+        vec![(mode_point, 0.0), (mode_point, max_density * 1.1)],
+        &BLACK,
+    )))?;
+
+    chart.draw_series(std::iter::once(DashedPathElement::new(
+        vec![(left_edge, 0.0), (left_edge, max_density * 1.1)],
+        10,
+        10,
+        &BLACK,
+    )))?;
+
+    chart.draw_series(std::iter::once(DashedPathElement::new(
+        vec![(right_edge, 0.0), (right_edge, max_density * 1.1)],
+        10,
+        10,
+        &BLACK,
+    )))?;
 
     Ok(())
 }
@@ -473,11 +632,6 @@ fn plot_2d_scatter(
     bounds: &[[f64; 2]; 4],
     marked_points_2d: &[(f64, f64)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Thin the data if too many points
-    let thin_factor = (x_data.len() / 5000).max(1);
-    let thinned_x: Vec<f64> = x_data.iter().step_by(thin_factor).copied().collect();
-    let thinned_y: Vec<f64> = y_data.iter().step_by(thin_factor).copied().collect();
-
     let [x_min, x_max] = bounds[col];
     let [y_min, y_max] = bounds[row];
 
@@ -500,7 +654,7 @@ fn plot_2d_scatter(
             let mut chart = chart_builder
                 .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col))?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -517,7 +671,7 @@ fn plot_2d_scatter(
             let mut chart =
                 chart_builder.build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col))?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -534,7 +688,7 @@ fn plot_2d_scatter(
             let mut chart =
                 chart_builder.build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col))?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -550,7 +704,7 @@ fn plot_2d_scatter(
         (false, false) => {
             let mut chart = chart_builder.build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-            draw_scatter_content(&mut chart, &thinned_x, &thinned_y, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col))?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -576,8 +730,6 @@ fn draw_scatter_content<
     Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
 >(
     chart: &mut ChartContext<SVGBackend, Cartesian2d<X, Y>>,
-    thinned_x: &Vec<f64>,
-    thinned_y: &Vec<f64>,
     param_names: &[&str; 4],
     (row, col): (usize, usize),
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -602,57 +754,43 @@ fn draw_scatter_content<
 
     mesh.draw()?;
 
-    // Create scatter plot with transparency
-    chart.draw_series(thinned_x.iter().zip(thinned_y.iter()).enumerate().map(
-        |(idx, (&x, &y))| {
-            let t = idx as f64 / thinned_x.len() as f64;
-
-            // Color interpolation: Blue (early) -> Purple (middle) -> Red (late)
-            let color = if t < 0.5 {
-                // Blue to Purple
-                let u = t * 2.0; // 0 to 1
-                RGBColor(
-                    (255.0 * u) as u8,         // R increases
-                    0,                         // G stays 0
-                    (255.0 * (1.0 - u)) as u8, // B decreases
-                )
-            } else {
-                // Purple to Red
-                let u = (t - 0.5) * 2.0; // 0 to 1
-                RGBColor(
-                    255,                       // R stays max
-                    (128.0 * u) as u8,         // G increases slightly
-                    (255.0 * (1.0 - u)) as u8, // B decreases
-                )
-            };
-
-            Circle::new((x, y), 1, color.mix(0.1).filled())
-        },
-    ))?;
-
     Ok(())
 }
 
-fn plot_kde(
-    area: &DrawingArea<SVGBackend, Shift>,
+fn plot_kde<
+    X: Ranged<ValueType = f64> + ValueFormatter<f64>,
+    Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
+>(
+    chart: &mut ChartContext<SVGBackend, Cartesian2d<X, Y>>,
     data: &[f64],
     min: f64,
     max: f64,
-    (row, col): (usize, usize),
     log_scale: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Simple KDE using Gaussian kernel
-    let bandwidth = match log_scale {
-        true => (max.ln() - min.ln()) / 50.0,
-        false => (max - min) / 50.0,
+
+    let n = data.len() as f64;
+
+    let bandwidth = if log_scale {
+        let log_data: Vec<f64> = data.iter().map(|x| x.ln()).collect();
+        let mean = log_data.iter().sum::<f64>() / n;
+        let var = log_data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let sigma = var.sqrt();
+        1.06 * sigma * n.powf(-0.2)
+    } else {
+        let mean = data.iter().sum::<f64>() / n;
+        let var = data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let sigma = var.sqrt();
+        1.06 * sigma * n.powf(-0.2)
     };
+
     let n_points = 200;
 
     let mut kde_points = Vec::new();
     for i in 0..n_points {
         let x = match log_scale {
-            true => (min.ln() + (max.ln() - min.ln()) * i as f64 / n_points as f64).exp(),
-            false => min + (max - min) * i as f64 / n_points as f64,
+            true => (min.ln() + (max.ln() - min.ln()) * i as f64 / (n_points - 1) as f64).exp(),
+            false => min + (max - min) * i as f64 / (n_points - 1) as f64,
         };
 
         let mut density = 0.0;
@@ -665,45 +803,13 @@ fn plot_kde(
         }
 
         density /= data.len() as f64 * bandwidth * (2.0 * std::f64::consts::PI).sqrt();
+        if log_scale {
+            density /= x; // Adjust for log scale
+        }
         kde_points.push((x, density));
     }
 
-    // Scale to match histogram
-    let max_density = kde_points
-        .iter()
-        .map(|&(_, d)| d)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let scale_factor = 1.0 / (1.1 * max_density);
-
-    let y_margin_width = match col {
-        0 => LABEL_WIDTH + Y_LABEL_PAD,
-        _ => LABEL_WIDTH,
-    };
-
-    match log_scale {
-        true => {
-            let mut chart = ChartBuilder::on(area)
-                .margin_left(y_margin_width)
-                .margin_bottom(LABEL_WIDTH)
-                .build_cartesian_2d((min..max).log_scale(), 0.0..1.0)?;
-
-            chart.draw_series(LineSeries::new(
-                kde_points.iter().map(|&(x, d)| (x, d * scale_factor)),
-                &RED,
-            ))?;
-        }
-        false => {
-            let mut chart = ChartBuilder::on(area)
-                .margin_left(y_margin_width)
-                .margin_bottom(LABEL_WIDTH)
-                .build_cartesian_2d(min..max, 0.0..1.0)?;
-
-            chart.draw_series(LineSeries::new(
-                kde_points.iter().map(|&(x, d)| (x, d * scale_factor)),
-                &RED,
-            ))?;
-        }
-    }
+    chart.draw_series(LineSeries::new(kde_points, &RED))?;
 
     Ok(())
 }
@@ -787,7 +893,6 @@ fn plot_2d_contours(
     // Simple 2D density estimation
     let grid_size = 100;
 
-    let mut density = vec![vec![0.0; grid_size]; grid_size];
     let mut edges = vec![vec![(0.0, 0.0); grid_size + 1]; grid_size + 1];
     for i in 0..=grid_size {
         for j in 0..=grid_size {
@@ -807,6 +912,7 @@ fn plot_2d_contours(
         }
     }
 
+    let mut density = vec![vec![0.0; grid_size]; grid_size];
     let mut count = 0;
     for (&x, &y) in x_data.iter().zip(y_data.iter()) {
         if x >= x_max || x < x_min || y >= y_max || y < y_min {
@@ -831,7 +937,8 @@ fn plot_2d_contours(
     //Normalize
     for i in 0..grid_size {
         for j in 0..grid_size {
-            density[i][j] /= count as f64
+            let area = (edges[i + 1][j].0 - edges[i][j].0) * (edges[i][j + 1].1 - edges[i][j].1);
+            density[i][j] /= area * count as f64
         }
     }
 
@@ -917,7 +1024,9 @@ fn draw_contour_content(
     let mut density_levels = [1.0; 5];
 
     for cell in cells {
-        cumulative_probability += cell.0;
+        let area = (edges[cell.3.0 + 1][cell.3.1].0 - edges[cell.3.0][cell.3.1].0)
+            * (edges[cell.3.0][cell.3.1 + 1].1 - edges[cell.3.0][cell.3.1].1);
+        cumulative_probability += cell.0 * area;
         cumulative_probabilities[cell.3.0][cell.3.1] = cumulative_probability;
 
         let mut color_opt = None;

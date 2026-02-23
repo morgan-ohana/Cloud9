@@ -134,6 +134,7 @@ pub fn rs_rhos_to_m200_c200(r_s: f64, rho_s: f64) -> (f64, f64) {
     (m200, c200)
 }
 
+#[derive(Clone)]
 pub enum McrSource {
     DuttonMaccio2014,
     DiemerJoyce2019,

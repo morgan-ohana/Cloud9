@@ -4,13 +4,14 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
+use rkyv::de;
 use serde::de::value::UsizeDeserializer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::UVB_TEMP;
 use crate::halo::{Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation};
 use crate::plotting::create_chain_trace_plots;
-use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_function};
+use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_functions};
 
 #[derive(Clone)]
 struct Walker {
@@ -88,6 +89,7 @@ fn stretch_move_parallel(
 }
 
 const LOG_SCALE: [bool; 4] = [true, false, false, true];
+const LOG_PRIOR: [bool; 4] = [true, false, false, true];
 pub fn find_parameters_mcmc(
     data: &Vec<(f64, f64)>,
     y_error_bar: &Vec<(f64, f64)>,
@@ -96,6 +98,7 @@ pub fn find_parameters_mcmc(
     num_steps: usize,
     burn_in: usize,
     n_walkers: usize,
+    prior: Prior,
 ) -> ([f64; 4], Vec<[f64; 4]>, Vec<f64>) {
     let bounds = {
         let mut bounds = lin_bounds.clone();
@@ -122,7 +125,7 @@ pub fn find_parameters_mcmc(
             }
             p[s] *= 1.0 + 0.1 * (rng.random::<f64>() - 0.5);
         }
-        let lp = log_likelihood(p, data, y_error_bar, true);
+        let lp = log_likelihood(p, data, y_error_bar, true, prior.clone());
         walkers.push(Walker {
             params: p,
             log_prob: lp,
@@ -136,7 +139,7 @@ pub fn find_parameters_mcmc(
     for step in 0..num_steps {
         stretch_move_parallel(
             &mut walkers,
-            &|p| log_likelihood(p, data, y_error_bar, true),
+            &|p| log_likelihood(p, data, y_error_bar, true, prior.clone()),
             a,
             &bounds,
         );
@@ -263,10 +266,6 @@ pub fn calculate_gelman_rubin(chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)]) ->
             .sum::<f64>()
             / (m - 1.0);
 
-        dbg!(param_idx);
-        dbg!(overall_mean);
-        dbg!(within_var);
-        dbg!(between_var);
         // Calculate pooled variance
         let pooled_var = ((n - 1.0) / n) * within_var + between_var;
 
@@ -284,6 +283,7 @@ pub fn likelihood_slice_profile(
     anchor_point: [f64; 4],
     slice_idx: usize,
     bounds: [f64; 2],
+    prior: Prior,
 ) {
     const N: usize = 100;
     let mut x_range = Vec::with_capacity(N);
@@ -304,19 +304,21 @@ pub fn likelihood_slice_profile(
             }
         }
 
-        let likelihood = log_likelihood(params, data, y_error_bar, true);
+        let likelihood = log_likelihood(params, data, y_error_bar, true, prior.clone());
 
         x_range.push(x);
         likelihoods.push(likelihood);
     }
 
-    plot_function(
+    plot_functions(
         &x_range,
-        &likelihoods,
+        &vec![likelihoods],
         "likelihood_profile.png",
         "Likelihood Profile",
         NAMES[slice_idx],
         "log likelihood",
+        vec![None],
+        vec![false],
         None,
         None,
     )
@@ -374,13 +376,15 @@ pub fn find_parameters_gradient_descent(
         n += 1
     }
 
-    plot_function(
+    plot_functions(
         &(0..n).map(|n| n as f64).collect(),
-        &error,
+        &vec![error],
         "fit_error.png",
         "Fitting Error",
         "Steps",
         "Error",
+        vec![None],
+        vec![false],
         None,
         None,
     )
@@ -389,11 +393,18 @@ pub fn find_parameters_gradient_descent(
     params
 }
 
+#[derive(Clone)]
+pub enum Prior {
+    MassConcentrationRelation(McrSource),
+    None,
+}
+
 fn log_likelihood(
     mut params: [f64; 4],
     data: &Vec<(f64, f64)>,
     y_error_bar: &Vec<(f64, f64)>,
     m200_input: bool,
+    prior: Prior,
 ) -> f64 {
     // undo log scale and compute jacobian
     let mut log_jacobian = 0.0;
@@ -401,29 +412,36 @@ fn log_likelihood(
         if LOG_SCALE[s] {
             params[s] = 10.0_f64.powf(params[s]);
 
-            // J = |dp/dlogp| = d/dx(10^x) = 10^x ln(10) = p ln(10)
-            // ln(J) = ln(p) + const
-            // log_jacobian += params[s].ln();
+            if !LOG_PRIOR[s] {
+                log_jacobian += params[s].ln();
+            }
         }
     }
 
-    let mut mcr_prior = 0.0;
+    let log_prior_likelihood = match prior {
+        Prior::MassConcentrationRelation(mcr_source) => {
+            let mut mcr_prior = 0.0;
+            if m200_input {
+                // received as m200, c200, tau, rho_c
+
+                // compute prior biases from mass-concetration-relation
+                let (mean_log10c, sigma_log10c) =
+                    mass_concentration_relation(params[0], mcr_source);
+                let log10c = params[1].log10();
+                mcr_prior = -0.5 * ((log10c - mean_log10c) / sigma_log10c).powi(2);
+            } else {
+                // No implemented Mcr prior for rho_s r_s space.
+            }
+
+            mcr_prior
+        }
+        Prior::None => 0.0,
+    };
+
     if m200_input {
         // recieved as m200, c200, tau, rho_c
-
-        // compute prior biases from mass-concetration-relation
-        let (mean_log10c, sigma_log10c) =
-            mass_concentration_relation(params[0], McrSource::DuttonMaccio2014);
-        let log10c = params[1].log10();
-        mcr_prior = -0.5 * ((log10c - mean_log10c) / sigma_log10c).powi(2);
-
-        // translate params
         (params[1], params[0]) = m200_c200_to_rs_rhos(params[0], params[1]);
-    } else {
-        // No implemented Mcr prior for rho_s r_s space.
     }
-
-    let halo = Halo::NFW(params[0], params[1]);
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let fit = isothermal_core_collapse_background(
@@ -432,7 +450,7 @@ fn log_likelihood(
         params[1],
         params[2],
         Some(params[3]),
-        (0.1 * data[0].0, halo.r_crit()),
+        (0.1 * data[0].0, 1.1 * data.last().unwrap().0),
         false,
     );
 
@@ -462,7 +480,7 @@ fn log_likelihood(
         sum_ln_sigma += spread.ln();
     }
 
-    -0.5 * chi_squared - sum_ln_sigma + mcr_prior + log_jacobian
+    -0.5 * chi_squared - sum_ln_sigma + log_prior_likelihood + log_jacobian
 }
 
 fn get_rms_err_of_fit(

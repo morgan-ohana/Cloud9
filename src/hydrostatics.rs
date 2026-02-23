@@ -1,8 +1,8 @@
 use std::f64::consts::PI;
 
-use crate::Halo;
 use crate::constants::*;
-use crate::plotting::plot_function;
+use crate::halo::Halo;
+use crate::plotting::plot_functions;
 
 const SPACIAL_GRID_NUM: usize = 1000;
 
@@ -26,6 +26,16 @@ fn get_rho_points<T: Fn(f64) -> f64>(rho: T, r_points: &Vec<f64>) -> Vec<f64> {
         //dbg!(rho_points.len());
     }
     rho_points
+}
+
+fn get_total_mass(rho_points: &Vec<f64>, r_points: &Vec<f64>) -> f64 {
+    let mut enclosed_mass = 0.0;
+    for i in 1..r_points.len() {
+        let vol = (4.0 * PI / 3.0) * (r_points[i].powi(3) - r_points[i - 1].powi(3));
+        let ave_rho = (rho_points[i] + rho_points[i - 1]) / 2.0;
+        enclosed_mass += ave_rho * vol;
+    }
+    enclosed_mass
 }
 
 fn get_force_points(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
@@ -99,7 +109,7 @@ fn get_hydrostatic_profile_outwards(
 
     external_field: Vec<f64>,
 
-    temperature_points: Vec<f64>,
+    temperature_points: &Vec<f64>,
 
     rho_center: f64,
 ) -> Vec<f64> {
@@ -248,7 +258,7 @@ pub fn isothermal_abg_background(
         }
         Some(rho_c) => {
             let external_field = get_force_points(dark_matter_rho_points, &r_points);
-            get_hydrostatic_profile_outwards(&r_points, external_field, temperature_points, rho_c)
+            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature_points, rho_c)
         }
     };
 
@@ -260,13 +270,15 @@ pub fn isothermal_abg_background(
         num_density
     };
 
-    plot_function(
+    plot_functions(
         &r_points,
-        &number_density,
+        &vec![number_density.clone()],
         "profile.png",
         "hydrostatic profile",
         "r (kpc)",
         "n_H (num / kpc^3)",
+        vec![None],
+        vec![false],
         None,
         None,
     )
@@ -289,13 +301,15 @@ pub fn isothermal_abg_background(
         ang_points
     };
 
-    plot_function(
+    plot_functions(
         &angular_points,
-        &column_density,
+        &vec![column_density],
         "column.png",
         "hydrostatic column density",
         "r (arcmin)",
         "n_H (num / cm^2)",
+        vec![None],
+        vec![false],
         None,
         None,
     )
@@ -311,22 +325,7 @@ pub fn isothermal_core_collapse_background(
     bounds: (f64, f64),
     plot: bool,
 ) -> (Vec<f64>, Vec<f64>) {
-    // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
-    let tau = collapse_progress;
-    let rho_s = rho_s_0
-        * (2.033 + 0.7381 * tau + 7.264 * tau.powi(5) - 12.73 * tau.powi(7)
-            + 9.915 * tau.powi(9)
-            + (1.0 - 2.033) * (tau + 0.001).ln() / (0.001_f64).ln());
-    let r_s = r_s_0
-        * (0.7178 - 0.1026 * tau + 0.2474 * tau.powi(2) - 0.4079 * tau.powi(3)
-            + (1.0 - 0.7178) * (tau + 0.001).ln() / (0.001_f64).ln());
-    let r_c = r_s_0
-        * (2.555 * tau.sqrt() - 3.632 * tau + 2.131 * tau.powi(2) - 1.415 * tau.powi(3)
-            + 0.4683 * tau.powi(4));
-
-    let rho = |r: f64| -> f64 {
-        rho_s / (((r.powi(4) + r_c.powi(4)).sqrt().sqrt() / r_s) * (1.0 + (r / r_s)).powi(2))
-    };
+    let rho = parametic_core_collapse(r_s_0, rho_s_0, collapse_progress);
 
     let r_points = get_r_points(bounds);
 
@@ -340,7 +339,7 @@ pub fn isothermal_core_collapse_background(
         }
         Some(rho_c) => {
             let external_field = get_force_points(dark_matter_rho_points, &r_points);
-            get_hydrostatic_profile_outwards(&r_points, external_field, temperature_points, rho_c)
+            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature_points, rho_c)
         }
     };
 
@@ -373,13 +372,15 @@ pub fn isothermal_core_collapse_background(
     */
 
     if plot {
-        plot_function(
+        plot_functions(
             &r_points,
-            &number_density,
+            &vec![number_density.clone()],
             "profile.png",
             "hydrostatic profile",
             "r (kpc)",
             "n_H (num / kpc^3)",
+            vec![None],
+            vec![false],
             None,
             None,
         )
@@ -404,13 +405,15 @@ pub fn isothermal_core_collapse_background(
     };
 
     if plot {
-        plot_function(
+        plot_functions(
             &angular_points,
-            &column_density,
+            &vec![column_density.clone()],
             "column.png",
             "hydrostatic column density",
             "r (arcmin)",
             "n_H (num / cm^2)",
+            vec![None],
+            vec![false],
             None,
             None,
         )
@@ -418,6 +421,134 @@ pub fn isothermal_core_collapse_background(
     }
 
     (angular_points, column_density)
+}
+
+fn parametic_core_collapse(r_s_0: f64, rho_s_0: f64, tau: f64) -> impl Fn(f64) -> f64 {
+    // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
+    let rho_s = rho_s_0
+        * (2.033 + 0.7381 * tau + 7.264 * tau.powi(5) - 12.73 * tau.powi(7)
+            + 9.915 * tau.powi(9)
+            + (1.0 - 2.033) * (tau + 0.001).ln() / (0.001_f64).ln());
+    let r_s = r_s_0
+        * (0.7178 - 0.1026 * tau + 0.2474 * tau.powi(2) - 0.4079 * tau.powi(3)
+            + (1.0 - 0.7178) * (tau + 0.001).ln() / (0.001_f64).ln());
+    let r_c = r_s_0
+        * (2.555 * tau.sqrt() - 3.632 * tau + 2.131 * tau.powi(2) - 1.415 * tau.powi(3)
+            + 0.4683 * tau.powi(4));
+
+    move |r: f64| -> f64 {
+        rho_s / (((r.powi(4) + r_c.powi(4)).sqrt().sqrt() / r_s) * (1.0 + (r / r_s)).powi(2))
+    }
+}
+
+pub fn evolution_profile(
+    anchor_params: &[f64; 4],
+    data: &Vec<(f64, f64)>,
+    data_y_err: &Vec<(f64, f64)>,
+) {
+    let halo = Halo::NFW(anchor_params[0], anchor_params[1]);
+    let bounds = (0.01 * anchor_params[1], halo.r_crit());
+    let r_points = get_r_points(bounds);
+    let temperature_points = vec![UVB_TEMP; r_points.len()];
+
+    fn get_profile_and_mass(
+        params: &[f64; 4],
+        r_points: &Vec<f64>,
+        temperature_points: &Vec<f64>,
+    ) -> (Vec<f64>, f64) {
+        let dm_rho = parametic_core_collapse(params[1], params[0], params[2]);
+        let dm_rho_points = get_rho_points(dm_rho, r_points);
+        let external_field = get_force_points(dm_rho_points, r_points);
+        let rho_gas_points = get_hydrostatic_profile_outwards(
+            r_points,
+            external_field,
+            temperature_points,
+            params[3],
+        );
+        let total_mass = get_total_mass(&rho_gas_points, r_points);
+
+        let number_density = {
+            let mut num_density = Vec::with_capacity(rho_gas_points.len());
+            for i in 0..rho_gas_points.len() {
+                num_density.push(rho_gas_points[i] / M_PROTON)
+            }
+            num_density
+        };
+
+        let column_density = {
+            let mut col_dens = get_column_density(number_density, &r_points);
+            for i in 0..col_dens.len() {
+                col_dens[i] /= CM_IN_KPC.powi(2);
+            }
+            col_dens
+        };
+
+        (column_density, total_mass)
+    }
+
+    // get anchor fit
+    let (anchor_gas_rho_points, total_mass) =
+        get_profile_and_mass(anchor_params, &r_points, &temperature_points);
+
+    // get evolution snapshots
+
+    let tau_snapshots = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    let mut gas_rho_points_vec = Vec::with_capacity(tau_snapshots.len() + 1);
+    let mut legends = Vec::with_capacity(tau_snapshots.len() + 1);
+    gas_rho_points_vec.push(anchor_gas_rho_points);
+    legends.push(Some(format!(
+        "Modern Cloud-9, tau = {:.2}",
+        anchor_params[2]
+    )));
+    let mut snapshot_params = anchor_params.clone();
+    for tau in tau_snapshots {
+        snapshot_params[2] = tau;
+        // Note I don't reset snapshot rho_c between snapshots as snapshots are likely to be closer to each other than the anchor point
+        let (mut snapshot_gas_rho_points, mut snapshot_total_mass) =
+            get_profile_and_mass(&snapshot_params, &r_points, &temperature_points);
+
+        let mut percent_diff = (snapshot_total_mass - total_mass) / total_mass;
+
+        while percent_diff.abs() >= 0.01 {
+            dbg!(percent_diff);
+            dbg!(snapshot_params[3]);
+            snapshot_params[3] -= percent_diff * anchor_params[3];
+
+            (snapshot_gas_rho_points, snapshot_total_mass) =
+                get_profile_and_mass(&snapshot_params, &r_points, &temperature_points);
+
+            percent_diff = (snapshot_total_mass - total_mass) / total_mass
+        }
+
+        gas_rho_points_vec.push(snapshot_gas_rho_points);
+        legends.push(Some(format!("tau = {}", tau)));
+    }
+
+    let angular_points = {
+        let mut ang_points = r_points.clone();
+        for i in 0..ang_points.len() {
+            ang_points[i] /= DISTANCE; // radians
+            ang_points[i] /= ARC_MIN; // arc mins
+        }
+        ang_points
+    };
+
+    let mut dashed = vec![true; gas_rho_points_vec.len()];
+    dashed[0] = false;
+
+    plot_functions(
+        &angular_points,
+        &gas_rho_points_vec,
+        "figures/evolution.svg",
+        "cloud evol",
+        "r (kpc)",
+        "rho (M_sun kpc^-3)",
+        legends,
+        dashed,
+        Some(data),
+        Some(data_y_err),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -459,14 +590,15 @@ mod tests {
 
         if rms_err > 0.01 || !rms_err.is_finite() {
             //dbg!(err);
-            plot_function(
+            plot_functions(
                 &r_points,
-                &err,
+                &vec![err],
                 "column_err_check.png",
                 "Column Density Error",
                 "r (kpc)",
                 "% err",
-                None,
+                vec![None],
+                vec![false],
                 None,
             )
             .unwrap();
@@ -507,14 +639,15 @@ mod tests {
 
         if rms_err > 0.01 || !rms_err.is_finite() {
             //dbg!(err);
-            plot_function(
+            plot_functions(
                 &r_points,
-                &err,
+                &vec![err],
                 "column_err_check2.png",
                 "Column Density Error",
                 "r (kpc)",
                 "% err",
-                None,
+                vec![None],
+                vec![false],
                 None,
             )
             .unwrap();

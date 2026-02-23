@@ -8,9 +8,11 @@ use crate::fitting::{
     find_parameters_mcmc, likelihood_slice_profile, split_chains,
 };
 use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
-use crate::hydrostatics::{isothermal_abg_background, isothermal_core_collapse_background};
+use crate::hydrostatics::{
+    evolution_profile, isothermal_abg_background, isothermal_core_collapse_background,
+};
 use crate::logging::{load_file, save_output, save_output_json};
-use crate::plotting::{create_chain_trace_plots, create_corner_plot, plot_function};
+use crate::plotting::{create_chain_trace_plots, create_corner_plot, plot_functions};
 
 mod constants;
 mod fitting;
@@ -85,6 +87,7 @@ fn main() {
         [1e10, 6.5, 0.35, 3.5e4],
         0,
         [1e8, 1e30],
+        fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014),
     );
 
     let cdm_fit_params = [
@@ -94,18 +97,25 @@ fn main() {
         169116.20672504138,
     ];
 
-    let mcmc: bool = true;
+    let mcmc: bool = false;
+    let prior = fitting::Prior::None; //fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014);
 
     let burn_in = 1000;
     let num_walkers = 512;
-    let real_steps = 10000;
+    let real_steps = 100000;
     let steps = real_steps + burn_in;
 
-    let file_name = format!("{}_x_{}k", num_walkers, real_steps / 1000);
+    let mut file_name = format!("{}_x_{}k", num_walkers, real_steps / 1000);
+    match prior {
+        fitting::Prior::MassConcentrationRelation(_) => {
+            file_name.push_str("_MCR");
+        }
+        fitting::Prior::None => {}
+    }
     let data_path = String::from("data/") + &file_name;
 
     let params: [f64; 4];
-    let bounds = [[1e8, 1e16], [0.0, 20.0], [0.0, 1.0], [1e4, 1e6]];
+    let bounds = [[1e8, 1e12], [0.0, 20.0], [0.0, 1.0], [1e4, 1e6]];
 
     let premade: Option<String> = Some(data_path.clone() + ".mcmc");
 
@@ -125,6 +135,7 @@ fn main() {
                 steps,
                 burn_in,
                 num_walkers,
+                prior,
             );
 
             dbg!(chain.len());
@@ -145,8 +156,6 @@ fn main() {
             )
             .unwrap();
         }
-
-        let mean_params = calculate_statistics(&chain, &m200_params);
 
         check_chain_behavior(&chain);
 
@@ -179,7 +188,7 @@ fn main() {
 
         create_corner_plot(
             &chain,
-            &[&grad_descent_fit, &mean_params, &m200_params],
+            &[&grad_descent_fit],
             &["m200_0", "c200_0", "tau", "rho_c"],
             &(String::from("figures/corner_plot_") + &file_name),
             &bounds,
@@ -197,6 +206,8 @@ fn main() {
         //params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2, 5e5], None);
         params = sidm_fit_params;
     }
+
+    evolution_profile(&params, &data, &data_y_err_bar);
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -234,15 +245,17 @@ fn main() {
     );
     println!("{}", &legend_text);
 
-    plot_function(
+    plot_functions(
         &fit.0,
-        &fit.1,
+        &vec![fit.1],
         &(String::from("figures/fit_") + &file_name + ".svg"),
         "Fit To Observed Profile",
         "r (arcmin)",
         "n_H (num / cm^2)",
-        Some(legend_text),
+        vec![Some(legend_text)],
+        vec![false],
         Some(&data),
+        Some(&data_y_err_bar),
     )
     .unwrap();
 }
