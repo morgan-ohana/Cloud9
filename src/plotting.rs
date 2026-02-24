@@ -498,6 +498,14 @@ fn plot_histogram(
 
             // Add KDE curve
             plot_kde(&mut chart, data, min, max, LOG_SCALE[row])?;
+
+            // Draw Legend
+            chart
+                .configure_series_labels()
+                .position(SeriesLabelPosition::UpperRight)
+                .background_style(&WHITE.mix(0.8))
+                .border_style(&BLACK)
+                .draw()?;
         }
         false => {
             let mut chart = chart_builder
@@ -518,6 +526,14 @@ fn plot_histogram(
 
             // Add KDE curve
             plot_kde(&mut chart, data, min, max, LOG_SCALE[row])?;
+            
+            // Draw Legend
+            chart
+                .configure_series_labels()
+                .position(SeriesLabelPosition::UpperRight)
+                .background_style(&WHITE.mix(0.8))
+                .border_style(&BLACK)
+                .draw()?;
         }
     };
 
@@ -604,7 +620,16 @@ fn draw_hist_content<
     chart.draw_series(std::iter::once(PathElement::new(
         vec![(mode_point, 0.0), (mode_point, max_density * 1.1)],
         &BLACK,
-    )))?;
+    )))?.label(format!("{param_name} = {mode_point:.3}  ({left_edge:.3}, {right_edge:.3})")).legend(move |(x, y)| {
+                PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    ShapeStyle {
+                        color: BLACK.mix(1.0),
+                        filled: false,
+                        stroke_width: 2,
+            },
+        )
+    });
 
     chart.draw_series(std::iter::once(DashedPathElement::new(
         vec![(left_edge, 0.0), (left_edge, max_density * 1.1)],

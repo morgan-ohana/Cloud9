@@ -97,7 +97,7 @@ fn main() {
         169116.20672504138,
     ];
 
-    let mcmc: bool = false;
+    let mcmc: bool = true;
     let prior = fitting::Prior::None; //fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014);
 
     let burn_in = 1000;
@@ -207,7 +207,7 @@ fn main() {
         params = sidm_fit_params;
     }
 
-    evolution_profile(&params, &data, &data_y_err_bar);
+    //evolution_profile(&params, &data, &data_y_err_bar);
 
     let t = 10.0;
     let t_c = t / params[2];
