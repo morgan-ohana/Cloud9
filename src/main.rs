@@ -3,18 +3,23 @@ use std::fs;
 use std::path::Path;
 
 use crate::constants::*;
+use crate::contour::get_3d_contour;
 use crate::fitting::{
     calculate_gelman_rubin, calculate_statistics, find_parameters_gradient_descent,
     find_parameters_mcmc, likelihood_slice_profile, split_chains,
 };
-use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
+use crate::halo::{Halo, deviation, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
 use crate::hydrostatics::{
     evolution_profile, isothermal_abg_background, isothermal_core_collapse_background,
 };
 use crate::logging::{load_file, save_output, save_output_json};
-use crate::plotting::{create_chain_trace_plots, create_corner_plot, plot_functions};
+use crate::plotting::{
+    create_chain_trace_plots, create_corner_plot, create_cross_section_plot,
+    create_mcr_deviation_plot, plot_functions,
+};
 
 mod constants;
+mod contour;
 mod fitting;
 mod halo;
 mod hydrostatics;
@@ -37,7 +42,7 @@ fn main() {
     ensure_dir_exists("trace_plots").unwrap();
     ensure_dir_exists("figures").unwrap();
 
-    let data = vec![
+    let data: Vec<(f64, f64)> = vec![
         (0.15649748494408605, 15595734576138530000.0),
         (0.18722388772639217, 15290963190523656000.0),
         (0.2252243432550796, 14924613361774703000.0),
@@ -55,7 +60,7 @@ fn main() {
         (1.983419488324015, 1615272370298475800.0),
     ];
 
-    let data_y_err_bar = vec![
+    let mut data_y_err_bar: Vec<(f64, f64)> = vec![
         (13732078146520720000.0, 17466755309837742000.0),
         (13427854263419597000.0, 17229242059185019000.0),
         (13003516161985374000.0, 16866179741318795000.0),
@@ -73,6 +78,16 @@ fn main() {
         (2.2656655652e17, 4312913465944557000.0), // ditto
     ];
 
+    // Lower bound for these two just y - k(y_err_upper - y) in log space
+    let n = data_y_err_bar.len();
+    let k = 3.0;
+    data_y_err_bar[n - 1].0 = 10.0_f64.powf(
+        data[n - 1].1.log10() - k * (data_y_err_bar[n - 1].1.log10() - data[n - 1].1.log10()),
+    );
+    data_y_err_bar[n - 2].0 = 10.0_f64.powf(
+        data[n - 2].1.log10() - k * (data_y_err_bar[n - 2].1.log10() - data[n - 2].1.log10()),
+    );
+
     // Found by grad descent:
     let sidm_fit_params = [
         6282772.676310997,
@@ -81,14 +96,14 @@ fn main() {
         54574.17044567845,
     ];
 
-    likelihood_slice_profile(
-        &data,
-        &data_y_err_bar,
-        [1e10, 6.5, 0.35, 3.5e4],
-        0,
-        [1e8, 1e30],
-        fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014),
-    );
+    // likelihood_slice_profile(
+    //     &data,
+    //     &data_y_err_bar,
+    //     [1e10, 6.5, 0.35, 3.5e4],
+    //     0,
+    //     [1e8, 1e30],
+    //     fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014),
+    // );
 
     let cdm_fit_params = [
         7585724.648997071,
@@ -115,7 +130,7 @@ fn main() {
     let data_path = String::from("data/") + &file_name;
 
     let params: [f64; 4];
-    let bounds = [[1e8, 1e12], [0.0, 20.0], [0.0, 1.0], [1e4, 1e6]];
+    let bounds = [[1e8, 1e12], [0.0, 50.0], [0.0001, 1.0], [1e4, 1e6]];
 
     let premade: Option<String> = Some(data_path.clone() + ".mcmc");
 
@@ -159,8 +174,7 @@ fn main() {
 
         check_chain_behavior(&chain);
 
-        dbg!(chain.len());
-        dbg!(chain.len() as f64 / 32.0);
+        get_3d_contour(&chain, &bounds);
 
         // let chains = split_chains(&(m200_params, chain.clone(), likelihoods), real_steps);
         // create_chain_trace_plots(&chains).unwrap();
@@ -178,13 +192,37 @@ fn main() {
             println!("Chains appear to have converged (R-hat < 1.1)");
         }
 
-        let grad_descent_fit = {
+        let (grad_descent_fit, grad_descent_sigma, grad_descent_deviation) = {
             let mut params = sidm_fit_params.clone();
+
+            let mut t_sigma_m = 150.0 * params[2]
+                / (0.75 * params[0] * params[1] * (4.0 * PI * GG * params[0]).sqrt())
+                * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+            t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+
             let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
             params[0] = m200;
             params[1] = c200;
-            params
+
+            let dev = deviation(m200, c200, halo::McrSource::DuttonMaccio2014);
+            (params, t_sigma_m, dev)
         };
+
+        create_mcr_deviation_plot(
+            &chain,
+            &(String::from("figures/deviation_plot_") + &file_name),
+            &[-8.0, 3.0],
+            &[grad_descent_deviation],
+        )
+        .unwrap();
+
+        create_cross_section_plot(
+            &chain,
+            &(String::from("figures/cross_section_plot_") + &file_name),
+            &[1e-1, 1e7],
+            &[grad_descent_sigma],
+        )
+        .unwrap();
 
         create_corner_plot(
             &chain,
@@ -220,13 +258,15 @@ fn main() {
 
     println!("sigma_m = {sigma_m} \nt_c = {t_c}");
 
+    let halo = Halo::NFW(params[0], params[1]);
+
     let fit = isothermal_core_collapse_background(
         UVB_TEMP,
         params[0],
         params[1],
         params[2],
         Some(params[3]),
-        (0.1 * data[0].0, 10.0 * data.last().unwrap().0),
+        (0.1 * data[0].0, halo.r_crit()),
         false,
     );
 

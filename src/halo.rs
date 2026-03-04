@@ -134,10 +134,27 @@ pub fn rs_rhos_to_m200_c200(r_s: f64, rho_s: f64) -> (f64, f64) {
     (m200, c200)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum McrSource {
     DuttonMaccio2014,
     DiemerJoyce2019,
+}
+
+pub fn deviation(m200: f64, c200: f64, source: McrSource) -> f64 {
+    match source {
+        McrSource::DuttonMaccio2014 => {
+            let a = 0.905;
+            let b = -0.101;
+            let sigma_log10c = 0.11; // intrinsic scatter
+
+            let median_log10c = b * (m200 * HH / 1e12).log10() + a;
+
+            (c200.log10() - median_log10c) / sigma_log10c
+        }
+        McrSource::DiemerJoyce2019 => {
+            todo!();
+        }
+    }
 }
 
 pub fn mass_concentration_relation(m200: f64, source: McrSource) -> (f64, f64) {
@@ -156,12 +173,27 @@ pub fn mass_concentration_relation(m200: f64, source: McrSource) -> (f64, f64) {
         }
         McrSource::DiemerJoyce2019 => {
             todo!();
+            // let sigma = ;
+            // let nu = 1.686 / sigma;
 
-            // Diemer & Joyce 2019, z=0
+            // // Params for mean
+            // let kappa = 0.42;
+            // let a_0 = 2.37;
+            // let a_1 = 1.74;
+            // let b_0 = 3.39;
+            // let b_1 = 1.82;
+            // let c_alpha = 0.20;
 
-            let delta_c = 1.686;
-            // let sigma_m = ;
-            // let nu = delta_c / sigma_m;
+            // let alpha_eff = 0.5; // at z = 0
+
+            // let cap_a = a_0 * (1.0 + a_1 * (n_eff + 3.0));
+            // let cap_b = b_0 * (1.0 + b_1 * (n_eff + 3.0));
+            // let cap_c = 1.0 - c_alpha * (1.0 - alpha_eff);
+
+            // let term = cap_a *(1.0 + (nu.powi(2)/ cap_b)) / nu;
+            // let cap_g = ;
+
+            // let mean_c
         }
     }
 }

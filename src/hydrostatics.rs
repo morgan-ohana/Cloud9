@@ -4,7 +4,7 @@ use crate::constants::*;
 use crate::halo::Halo;
 use crate::plotting::plot_functions;
 
-const SPACIAL_GRID_NUM: usize = 1000;
+const SPACIAL_GRID_NUM: usize = 2000;
 
 fn get_r_points(bounds: (f64, f64)) -> Vec<f64> {
     let mut r_points = Vec::with_capacity(SPACIAL_GRID_NUM);
@@ -65,6 +65,47 @@ fn argswhere(vec: &Vec<f64>, value: f64) -> (usize, usize) {
     }
 
     (low, high)
+}
+
+fn get_column_density_at_points(
+    rho_points: Vec<f64>,
+    r_points: &Vec<f64>,
+    projected_points: &Vec<f64>,
+) -> Vec<f64> {
+    // Σ(R) = 2 ∫_0^∞ ρ(√(z² + R²)) dz = 2 ∫_R^∞ [ρ(r) * r / √(r² - R²)] dr
+
+    let mut sigma = vec![0.0; projected_points.len()];
+    let r_max = *r_points.last().unwrap();
+    let z_points = r_points.clone();
+
+    for i in 0..projected_points.len() {
+        let r_projected = projected_points[i];
+
+        for j in 1..z_points.len() {
+            let z1 = z_points[j - 1];
+            let z2 = z_points[j];
+            let dz = z2 - z1;
+            let r1 = (z1.powi(2) + r_projected.powi(2)).sqrt();
+            let r2 = (z2.powi(2) + r_projected.powi(2)).sqrt();
+
+            if r1 > r_max {
+                break;
+            }
+
+            let rho1 = {
+                let (low, high) = argswhere(&r_points, r1);
+                let t = (r1 - r_points[low]) / (r_points[high] - r_points[low]);
+                t * rho_points[high] + (1.0 - t) * rho_points[low]
+            };
+            let rho2 = {
+                let (low, high) = argswhere(&r_points, r2);
+                let t = (r2 - r_points[low]) / (r_points[high] - r_points[low]);
+                t * rho_points[high] + (1.0 - t) * rho_points[low]
+            };
+            sigma[i] += (rho1 + rho2) * dz;
+        }
+    }
+    sigma
 }
 
 fn get_column_density(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
@@ -314,6 +355,61 @@ pub fn isothermal_abg_background(
         None,
     )
     .unwrap();
+}
+
+pub fn isothermal_core_collapse_background_at_points(
+    temp: f64,
+    rho_s_0: f64,
+    r_s_0: f64,
+    collapse_progress: f64,
+    rho_c: Option<f64>,
+    bounds: (f64, f64),
+    ang_points: Vec<f64>,
+) -> Vec<f64> {
+    let rho = parametic_core_collapse(r_s_0, rho_s_0, collapse_progress);
+
+    let r_points = get_r_points(bounds);
+
+    let dark_matter_rho_points = get_rho_points(rho, &r_points);
+
+    let temperature_points = vec![temp; r_points.len()];
+
+    let rho_points = match rho_c {
+        None => {
+            get_hydrostatic_profile_inwards(&r_points, dark_matter_rho_points, temperature_points)
+        }
+        Some(rho_c) => {
+            let external_field = get_force_points(dark_matter_rho_points, &r_points);
+            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature_points, rho_c)
+        }
+    };
+
+    let number_density = {
+        let mut num_density = Vec::with_capacity(rho_points.len());
+        for i in 0..rho_points.len() {
+            num_density.push(rho_points[i] / M_PROTON)
+        }
+        num_density
+    };
+
+    let points = {
+        let mut points = ang_points.clone();
+        for i in 0..points.len() {
+            points[i] *= ARC_MIN; // radians
+            points[i] *= DISTANCE; // kpc
+        }
+        points
+    };
+
+    let column_density = {
+        let mut col_dens = get_column_density_at_points(number_density, &r_points, &points);
+        for i in 0..col_dens.len() {
+            col_dens[i] /= CM_IN_KPC.powi(2);
+        }
+        col_dens
+    };
+
+    column_density
 }
 
 pub fn isothermal_core_collapse_background(

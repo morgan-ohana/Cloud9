@@ -3,6 +3,12 @@ use plotters::coord::ranged1d::ValueFormatter;
 use plotters::element::DashedPathElement;
 use plotters::prelude::*;
 
+use crate::constants::*;
+use crate::halo::{McrSource, deviation, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
+use std::arch::x86_64::_SIDD_MASKED_POSITIVE_POLARITY;
+use std::f64::consts::PI;
+use std::ops::Sub;
+
 pub fn plot_functions(
     x_points: &Vec<f64>,
     y_points: &Vec<Vec<f64>>,
@@ -26,6 +32,8 @@ pub fn plot_functions(
         Some(data_points) => 0.9 * data_points[0].0..1.1 * data_points.last().unwrap().0,
         None => x_points[0]..x_points[x_points.len() - 1],
     };
+
+    let x_range = x_points[0]..x_points[x_points.len() - 1];
 
     match data {
         Some(data_points) => {
@@ -218,6 +226,121 @@ pub fn plot_functions(
     Ok(())
 }
 
+pub fn create_mcr_deviation_plot(
+    chain: &[[f64; 4]],
+    output_path: &str,
+    bounds: &[f64; 2],
+    marked_values: &[f64],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut deviation_chain = Vec::with_capacity(chain.len());
+    let mut mean_deviation = 0.0;
+    let mut mean_square_deviation = 0.0;
+    for params in chain {
+        let deviation = deviation(params[0], params[1], McrSource::DuttonMaccio2014);
+
+        mean_deviation += deviation;
+        mean_square_deviation += deviation.powi(2);
+        deviation_chain.push(deviation);
+    }
+
+    mean_deviation /= chain.len() as f64;
+    mean_square_deviation /= chain.len() as f64;
+    let var_deviation = mean_square_deviation - mean_deviation.powi(2);
+
+    dbg!(mean_deviation, var_deviation.sqrt());
+
+    let output_path = String::from(output_path);
+    let svg_path = &(output_path.clone() + ".svg");
+    let pdf_path = &(output_path.clone() + ".pdf");
+    // Create plot area
+    let root = SVGBackend::new(svg_path, (1600, 1600)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    plot_histogram(
+        &root.margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5),
+        &deviation_chain,
+        "deviation from cosmological median",
+        (4, 4),
+        &bounds,
+        &marked_values,
+        None,
+    )?;
+
+    root.present()?;
+    println!("Sigma plot saved to: {}.svg", output_path);
+
+    let status = std::process::Command::new("inkscape")
+        .args(&["--export-type=pdf", "--export-filename", pdf_path, svg_path])
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Inkscape failed with status: {}", status).into())
+    }
+}
+
+pub fn create_cross_section_plot(
+    chain: &[[f64; 4]],
+    output_path: &str,
+    bounds: &[f64; 2],
+    marked_values: &[f64],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut t_sigma_m_chain = Vec::with_capacity(chain.len());
+    let mut mean_log_sigma = 0.0;
+    let mut mean_square_log_sigma = 0.0;
+    for params in chain {
+        let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+        let mut t_sigma_m = 150.0 * params[2]
+            / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
+            * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+
+        mean_log_sigma += t_sigma_m.log10();
+        mean_square_log_sigma += t_sigma_m.log10().powi(2);
+        t_sigma_m_chain.push(t_sigma_m.log10());
+    }
+
+    mean_log_sigma /= chain.len() as f64;
+    mean_square_log_sigma /= chain.len() as f64;
+    let var_log_sigma = mean_square_log_sigma - mean_log_sigma.powi(2);
+
+    dbg!(mean_log_sigma, var_log_sigma.sqrt());
+
+    let bounds = [bounds[0].log10(), bounds[1].log10()];
+    let marked_values = [marked_values[0].log10()];
+
+    let output_path = String::from(output_path);
+    let svg_path = &(output_path.clone() + ".svg");
+    let pdf_path = &(output_path.clone() + ".pdf");
+    // Create plot area
+    let root = SVGBackend::new(svg_path, (1600, 1600)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    plot_histogram(
+        &root.margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5),
+        &t_sigma_m_chain,
+        "log(t sigma/m)",
+        (4, 4),
+        &bounds,
+        &marked_values,
+        None, //Some(&[&prob_dens]),
+    )?;
+
+    root.present()?;
+    println!("Sigma plot saved to: {}.svg", output_path);
+
+    let status = std::process::Command::new("inkscape")
+        .args(&["--export-type=pdf", "--export-filename", pdf_path, svg_path])
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Inkscape failed with status: {}", status).into())
+    }
+}
+
 pub fn create_chain_trace_plots(
     chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)],
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -306,7 +429,7 @@ pub fn create_chain_trace_plots(
 
 const LABEL_WIDTH: u32 = 30;
 const Y_LABEL_PAD: u32 = 15;
-const LOG_SCALE: [bool; 4] = [true, false, false, true];
+const LOG_SCALE: [bool; 5] = [true, false, false, true, false]; // [m200, c200, tau, rho_c, t sigma/m], sigma does not occur in chains or corner plot it's just here so histogram can be reused
 pub fn create_corner_plot(
     chain: &[[f64; 4]],
     marked_points: &[&[f64; 4]],
@@ -361,6 +484,7 @@ pub fn create_corner_plot(
                     (row, col),
                     &bounds[row],
                     &marked_values,
+                    None,
                 )?;
             } else if row > col {
                 // Lower triangle: 2D scatter/density
@@ -403,6 +527,7 @@ fn plot_histogram(
     (row, col): (usize, usize),
     bounds: &[f64; 2],
     marked_values: &[f64],
+    extra_functions: Option<&[&dyn Fn(f64) -> f64]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Calculate bins
     let min = bounds[0];
@@ -466,13 +591,13 @@ fn plot_histogram(
     // Create chart for histogram
     let mut chart_builder = ChartBuilder::on(area);
 
-    if col == 0 {
+    if col == 0 || col == 4 {
         chart_builder.y_label_area_size(LABEL_WIDTH + Y_LABEL_PAD);
     } else {
         chart_builder.margin_left(LABEL_WIDTH);
     }
 
-    if row == 3 {
+    if row == 3 || row == 4 {
         chart_builder.x_label_area_size(LABEL_WIDTH);
     } else {
         chart_builder.margin_bottom(LABEL_WIDTH);
@@ -498,6 +623,18 @@ fn plot_histogram(
 
             // Add KDE curve
             plot_kde(&mut chart, data, min, max, LOG_SCALE[row])?;
+
+            // Add extra functions
+            if let Some(extra_funcs) = extra_functions {
+                let x_points: Vec<f64> = (0..=1000)
+                    .map(|i| (min.ln() + (i as f64) * (max.ln() - min.ln()) / 1000.0).exp())
+                    .collect();
+                for extra_func in extra_funcs {
+                    let points: Vec<(f64, f64)> =
+                        x_points.iter().map(|x| (*x, extra_func(*x))).collect();
+                    let _series = chart.draw_series(LineSeries::new(points, &GREEN));
+                }
+            }
 
             // Draw Legend
             chart
@@ -526,7 +663,19 @@ fn plot_histogram(
 
             // Add KDE curve
             plot_kde(&mut chart, data, min, max, LOG_SCALE[row])?;
-            
+
+            // Add extra functions
+            if let Some(extra_funcs) = extra_functions {
+                let x_points: Vec<f64> = (0..=1000)
+                    .map(|i| min + (i as f64) * (max - min) / 1000.0)
+                    .collect();
+                for extra_func in extra_funcs {
+                    let points: Vec<(f64, f64)> =
+                        x_points.iter().map(|x| (*x, extra_func(*x))).collect();
+                    let _series = chart.draw_series(LineSeries::new(points, &GREEN));
+                }
+            }
+
             // Draw Legend
             chart
                 .configure_series_labels()
@@ -586,60 +735,89 @@ fn draw_hist_content<
     bins.sort_by(|bin_a, bin_b| bin_b.1.partial_cmp(&bin_a.1).unwrap());
 
     let mode_idx = bins[0].0;
+    let mode_point = 0.5 * (edges[mode_idx] + edges[mode_idx + 1]);
 
     let mut cumulative_probability = 0.0;
-    let mut included_indices = Vec::new();
+    let sigma_levels = [0.6827, 0.9545, 0.9973];
+    let mut included_indices = vec![Vec::new(); sigma_levels.len()];
     for i in 0..bins.len() {
         let idx = bins[i].0;
         cumulative_probability += density[idx] * (edges[idx + 1] - edges[idx]);
-        included_indices.push(idx);
-        if cumulative_probability > 0.6827 {
+        for n in 0..sigma_levels.len() {
+            if cumulative_probability > sigma_levels[n] {
+                continue;
+            }
+
+            included_indices[n].push(idx);
+        }
+
+        if &cumulative_probability > sigma_levels.last().unwrap() {
             break;
         }
     }
 
-    included_indices.sort();
+    let mut interval_edges = Vec::new();
+    for n in 0..sigma_levels.len() {
+        included_indices[n].sort();
 
-    let (left_idx, right_idx) = (
-        included_indices[0],
-        included_indices[included_indices.len() - 1],
-    );
+        let (left_idx, right_idx): (usize, usize) =
+            (included_indices[n][0], *included_indices[n].last().unwrap());
 
-    let mut sixty_eight_percent = 0.0;
-    for i in left_idx..=right_idx {
-        sixty_eight_percent += density[i] * (edges[i + 1] - edges[i]);
+        let mut included_prob = 0.0;
+        for i in left_idx..=right_idx {
+            included_prob += density[i] * (edges[i + 1] - edges[i]);
+        }
+        println!("{} = {:.4}", sigma_levels[n], included_prob);
+
+        // get positions of edges that bracket 1-sigma interval
+        let left_edge = 0.5 * (edges[left_idx] + edges[left_idx + 1]);
+        let right_edge = 0.5 * (edges[right_idx] + edges[right_idx + 1]);
+
+        println!(
+            "{} sigma bounds: ({:.5}, {:.5})",
+            n + 1,
+            left_edge,
+            right_edge
+        );
+
+        interval_edges.push((left_edge, right_edge));
     }
-    dbg!(sixty_eight_percent);
 
-    // get positions of edges that bracket 1-sigma interval
-    let left_edge = 0.5 * (edges[left_idx] + edges[left_idx + 1]);
-    let right_edge = 0.5 * (edges[right_idx] + edges[right_idx + 1]);
-
-    let mode_point = 0.5 * (edges[mode_idx] + edges[mode_idx + 1]);
-
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(mode_point, 0.0), (mode_point, max_density * 1.1)],
-        &BLACK,
-    )))?.label(format!("{param_name} = {mode_point:.3}  ({left_edge:.3}, {right_edge:.3})")).legend(move |(x, y)| {
-                PathElement::new(
-                    vec![(x, y), (x + 20, y)],
-                    ShapeStyle {
-                        color: BLACK.mix(1.0),
-                        filled: false,
-                        stroke_width: 2,
-            },
-        )
-    });
+    chart
+        .draw_series(std::iter::once(PathElement::new(
+            vec![(mode_point, 0.0), (mode_point, max_density * 1.1)],
+            &BLACK,
+        )))?
+        .label(format!(
+            "{param_name} = {mode_point:.3}  ({:.3}, {:.3})",
+            interval_edges[0].0, interval_edges[0].1
+        ))
+        .legend(move |(x, y)| {
+            PathElement::new(
+                vec![(x, y), (x + 20, y)],
+                ShapeStyle {
+                    color: BLACK.mix(1.0),
+                    filled: false,
+                    stroke_width: 2,
+                },
+            )
+        });
 
     chart.draw_series(std::iter::once(DashedPathElement::new(
-        vec![(left_edge, 0.0), (left_edge, max_density * 1.1)],
+        vec![
+            (interval_edges[0].0, 0.0),
+            (interval_edges[0].0, max_density * 1.1),
+        ],
         10,
         10,
         &BLACK,
     )))?;
 
     chart.draw_series(std::iter::once(DashedPathElement::new(
-        vec![(right_edge, 0.0), (right_edge, max_density * 1.1)],
+        vec![
+            (interval_edges[0].1, 0.0),
+            (interval_edges[0].1, max_density * 1.1),
+        ],
         10,
         10,
         &BLACK,

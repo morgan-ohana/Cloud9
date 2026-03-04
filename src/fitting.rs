@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::constants::UVB_TEMP;
 use crate::halo::{Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation};
+use crate::hydrostatics::isothermal_core_collapse_background_at_points;
 use crate::plotting::create_chain_trace_plots;
 use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_functions};
 
@@ -24,7 +25,7 @@ impl Walker {
     fn lin_params(&self) -> [f64; 4] {
         let mut lin_params = self.params.clone();
         for s in 0..4 {
-            if LOG_SCALE[s] {
+            if LOG_STEP[s] {
                 lin_params[s] = 10.0_f64.powf(self.params[s])
             }
         }
@@ -88,7 +89,7 @@ fn stretch_move_parallel(
     });
 }
 
-const LOG_SCALE: [bool; 4] = [true, false, false, true];
+const LOG_STEP: [bool; 4] = [true, true, true, true];
 const LOG_PRIOR: [bool; 4] = [true, false, false, true];
 pub fn find_parameters_mcmc(
     data: &Vec<(f64, f64)>,
@@ -103,7 +104,7 @@ pub fn find_parameters_mcmc(
     let bounds = {
         let mut bounds = lin_bounds.clone();
         for s in 0..4 {
-            if LOG_SCALE[s] {
+            if LOG_STEP[s] {
                 bounds[s][0] = bounds[s][0].log10();
                 bounds[s][1] = bounds[s][1].log10();
             }
@@ -120,7 +121,7 @@ pub fn find_parameters_mcmc(
     for i in 0..n_walkers {
         let mut p = initial_guess;
         for s in 0..4 {
-            if LOG_SCALE[s] {
+            if LOG_STEP[s] {
                 p[s] = p[s].log10()
             }
             p[s] *= 1.0 + 0.1 * (rng.random::<f64>() - 0.5);
@@ -289,7 +290,7 @@ pub fn likelihood_slice_profile(
     let mut x_range = Vec::with_capacity(N);
     let mut likelihoods = Vec::with_capacity(N);
     for n in 0..N {
-        let x = match LOG_SCALE[slice_idx] {
+        let x = match LOG_STEP[slice_idx] {
             true => {
                 (bounds[0].ln() + (n as f64 / N as f64) * (bounds[1].ln() - bounds[0].ln())).exp()
             }
@@ -299,7 +300,7 @@ pub fn likelihood_slice_profile(
         let mut params = anchor_point.clone();
         params[slice_idx] = x;
         for s in 0..4 {
-            if LOG_SCALE[s] {
+            if LOG_STEP[s] {
                 params[s] = params[s].log10();
             }
         }
@@ -393,7 +394,7 @@ pub fn find_parameters_gradient_descent(
     params
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Prior {
     MassConcentrationRelation(McrSource),
     None,
@@ -409,7 +410,7 @@ fn log_likelihood(
     // undo log scale and compute jacobian
     let mut log_jacobian = 0.0;
     for s in 0..4 {
-        if LOG_SCALE[s] {
+        if LOG_STEP[s] {
             params[s] = 10.0_f64.powf(params[s]);
 
             if !LOG_PRIOR[s] {
@@ -443,38 +444,29 @@ fn log_likelihood(
         (params[1], params[0]) = m200_c200_to_rs_rhos(params[0], params[1]);
     }
 
+    let halo = Halo::NFW(params[0], params[1]);
+
+    let ang_points = data.iter().map(|(ang, _)| *ang).collect();
+
     // must be passed as rho_s_0, r_s_0, tau, rho_c
-    let fit = isothermal_core_collapse_background(
+    let model_points = isothermal_core_collapse_background_at_points(
         UVB_TEMP,
         params[0],
         params[1],
         params[2],
         Some(params[3]),
-        (0.1 * data[0].0, 1.1 * data.last().unwrap().0),
-        false,
+        (0.1 * data[0].0, halo.r_crit()), // Must go out to r_crit so I have whole halo for projected density
+        ang_points,
     );
 
     // compute X^2
     let mut chi_squared = 0.0;
     let mut sum_ln_sigma = 0.0;
     for i in 0..data.len() {
-        let point = data[i];
-
-        let mut high = fit.0.len() - 1;
-        let mut low = 0;
-        while high - low > 1 {
-            let mid = (low + high) / 2;
-            if point.0 > fit.0[mid] {
-                low = mid
-            } else {
-                high = mid
-            }
-        }
-
-        let diff = fit.1[low] - point.1;
+        let diff = model_points[i] - data[i].1;
         let spread = match diff > 0.0 {
-            true => y_error_bar[i].1 - point.1,
-            false => point.1 - y_error_bar[i].0,
+            true => y_error_bar[i].1 - data[i].1,
+            false => data[i].1 - y_error_bar[i].0,
         };
         chi_squared += (diff / spread).powi(2);
         sum_ln_sigma += spread.ln();
