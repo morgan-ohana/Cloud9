@@ -1,3 +1,5 @@
+use plotters::prelude::*;
+use rand::seq::SliceRandom;
 use std::f64::consts::PI;
 use std::fs;
 use std::path::Path;
@@ -8,7 +10,10 @@ use crate::fitting::{
     calculate_gelman_rubin, calculate_statistics, find_parameters_gradient_descent,
     find_parameters_mcmc, likelihood_slice_profile, split_chains,
 };
-use crate::halo::{Halo, deviation, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
+use crate::halo::{
+    Halo, deviation, init_diemer_joyce, m200_c200_to_rs_rhos, mass_concentration_relation,
+    rs_rhos_to_m200_c200,
+};
 use crate::hydrostatics::{
     evolution_profile, isothermal_abg_background, isothermal_core_collapse_background,
 };
@@ -18,6 +23,7 @@ use crate::plotting::{
     create_mcr_deviation_plot, plot_functions,
 };
 
+mod concentration_table;
 mod constants;
 mod contour;
 mod fitting;
@@ -41,6 +47,8 @@ fn main() {
     ensure_dir_exists("data").unwrap();
     ensure_dir_exists("trace_plots").unwrap();
     ensure_dir_exists("figures").unwrap();
+
+    let _ = init_diemer_joyce("concentration_table.bin");
 
     let data: Vec<(f64, f64)> = vec![
         (0.15649748494408605, 15595734576138530000.0),
@@ -112,8 +120,19 @@ fn main() {
         169116.20672504138,
     ];
 
-    let mcmc: bool = true;
-    let prior = fitting::Prior::None; //fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014);
+    let mut mcmc_fit_params = [1.9e9, 9.3, 1.5, 5.5e4]; //[2.95124e9, 8.925, 0.161084, 5.17612e4];
+
+    {
+        let (r_s, rho_s) = m200_c200_to_rs_rhos(mcmc_fit_params[0], mcmc_fit_params[1]);
+        mcmc_fit_params[0] = rho_s;
+        mcmc_fit_params[1] = r_s;
+    }
+
+    dbg!(mcmc_fit_params);
+
+    let mcmc_plots: bool = true;
+    let prior = fitting::Prior::None;
+    //let prior = fitting::Prior::MassConcentrationRelation(halo::McrSource::DiemerJoyce2019);
 
     let burn_in = 1000;
     let num_walkers = 512;
@@ -130,11 +149,14 @@ fn main() {
     let data_path = String::from("data/") + &file_name;
 
     let params: [f64; 4];
-    let bounds = [[1e8, 1e12], [0.0, 50.0], [0.0001, 1.0], [1e4, 1e6]];
+    let bounds = [[1e8, 1e10], [0.0, 25.0], [0.0001, 1.0], [1e4, 1e6]];
+
+    //let font: FontDesc<'static> = ("sans-serif", 12).into_font(); //Paper
+    let font: FontDesc<'static> = ("sans-serif", 25).into_font(); //Presentations
 
     let premade: Option<String> = Some(data_path.clone() + ".mcmc");
 
-    if mcmc {
+    if mcmc_plots {
         let (m200_params, chain, likelihoods): ([f64; 4], Vec<[f64; 4]>, Vec<f64>);
         if let Some(filename) = premade {
             let mcmc_output = load_file(filename).unwrap();
@@ -192,6 +214,19 @@ fn main() {
             println!("Chains appear to have converged (R-hat < 1.1)");
         }
 
+        let mcmc_sigma = {
+            let params = m200_params.clone();
+            let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+
+            let mut t_sigma_m = 150.0 * params[2]
+                / (0.75 * r_s * rho_s * (4.0 * PI * GG * rho_s).sqrt())
+                * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+            t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+
+            t_sigma_m
+        };
+        dbg!(mcmc_sigma);
+
         let (grad_descent_fit, grad_descent_sigma, grad_descent_deviation) = {
             let mut params = sidm_fit_params.clone();
 
@@ -204,15 +239,56 @@ fn main() {
             params[0] = m200;
             params[1] = c200;
 
-            let dev = deviation(m200, c200, halo::McrSource::DuttonMaccio2014);
+            let dev = deviation(m200, c200, halo::McrSource::DiemerJoyce2019);
             (params, t_sigma_m, dev)
         };
+
+        let mut pruned_chain = Vec::new();
+        let mut marked_points = Vec::new();
+
+        for i in 0..chain.len() {
+            let params = chain[i];
+
+            let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+            let mut t_sigma_m = 150.0 * params[2]
+                / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
+                * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+            t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+
+            let sigma_m = t_sigma_m / 10.0;
+
+            if sigma_m > 5e3 {
+                marked_points.push(params);
+            }
+
+            let dev = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
+            if dev > -3.0 {
+                pruned_chain.push(params)
+            }
+        }
+        dbg!(marked_points.len());
+
+        // use rand::seq::SliceRandom;
+        // let mut rng = rand::rng();
+        // marked_points.shuffle(&mut rng);
+
+        // let mut marked_points_arr: [&[f64; 4]; 100] = [&[0.0; 4]; 100];
+        // let mut marked_dev: [f64; 100] = [0.0; 100];
+        // for i in 0..100 {
+        //     marked_points_arr[i] = &marked_points[i];
+        //     marked_dev[i] = deviation(
+        //         marked_points[i][0],
+        //         marked_points[i][1],
+        //         halo::McrSource::DiemerJoyce2019
+        //     )
+        // }
 
         create_mcr_deviation_plot(
             &chain,
             &(String::from("figures/deviation_plot_") + &file_name),
             &[-8.0, 3.0],
             &[grad_descent_deviation],
+            font.clone(),
         )
         .unwrap();
 
@@ -220,21 +296,23 @@ fn main() {
             &chain,
             &(String::from("figures/cross_section_plot_") + &file_name),
             &[1e-1, 1e7],
-            &[grad_descent_sigma],
+            &[grad_descent_sigma, mcmc_sigma],
+            font.clone(),
         )
         .unwrap();
 
         create_corner_plot(
             &chain,
-            &[&grad_descent_fit],
+            &[&grad_descent_fit, &m200_params],
             &["m200_0", "c200_0", "tau", "rho_c"],
             &(String::from("figures/corner_plot_") + &file_name),
             &bounds,
+            font.clone(),
         )
         .unwrap();
 
         params = {
-            let mut params = m200_params.clone();
+            let mut params = marked_points[0].clone(); // m200_params.clone();
             let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
             params[0] = rho_s;
             params[1] = r_s;
@@ -242,10 +320,12 @@ fn main() {
         }
     } else {
         //params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2, 5e5], None);
-        params = sidm_fit_params;
+        params = cdm_fit_params;
     }
 
-    //evolution_profile(&params, &data, &data_y_err_bar);
+    dbg!(params);
+
+    //evolution_profile(&params, &data, &data_y_err_bar, font.clone());
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -280,7 +360,7 @@ fn main() {
     );
 
     let legend_text = format!(
-        "rho_s_0: {:.4e}\nr_s_0: {:.4e}\ntau: {}",
+        "rho_s_0: {:.2e}  \nr_s_0: {:.2}  \ntau: {:.2}",
         params[0], params[1], params[2]
     );
     println!("{}", &legend_text);
@@ -293,6 +373,7 @@ fn main() {
         "r (arcmin)",
         "n_H (num / cm^2)",
         vec![Some(legend_text)],
+        font,
         vec![false],
         Some(&data),
         Some(&data_y_err_bar),

@@ -1,5 +1,6 @@
 use core::num;
 use plotters::prelude::IntoLogRange;
+use plotters::style::IntoFont;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use rand_pcg::Pcg64;
@@ -89,8 +90,8 @@ fn stretch_move_parallel(
     });
 }
 
-const LOG_STEP: [bool; 4] = [true, true, true, true];
-const LOG_PRIOR: [bool; 4] = [true, false, false, true];
+const LOG_STEP: [bool; 4] = [false, false, false, false];
+const LOG_PRIOR: [bool; 4] = [false, false, false, false];
 pub fn find_parameters_mcmc(
     data: &Vec<(f64, f64)>,
     y_error_bar: &Vec<(f64, f64)>,
@@ -319,6 +320,7 @@ pub fn likelihood_slice_profile(
         NAMES[slice_idx],
         "log likelihood",
         vec![None],
+        ("sans-serif", 12).into_font(),
         vec![false],
         None,
         None,
@@ -385,6 +387,7 @@ pub fn find_parameters_gradient_descent(
         "Steps",
         "Error",
         vec![None],
+        ("sans-serif", 12).into_font(),
         vec![false],
         None,
         None,

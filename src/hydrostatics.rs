@@ -1,5 +1,7 @@
 use std::f64::consts::PI;
 
+use plotters::style::{FontDesc, IntoFont};
+
 use crate::constants::*;
 use crate::halo::Halo;
 use crate::plotting::plot_functions;
@@ -319,6 +321,7 @@ pub fn isothermal_abg_background(
         "r (kpc)",
         "n_H (num / kpc^3)",
         vec![None],
+        ("sans-serif", 12).into_font(),
         vec![false],
         None,
         None,
@@ -350,6 +353,7 @@ pub fn isothermal_abg_background(
         "r (arcmin)",
         "n_H (num / cm^2)",
         vec![None],
+        ("sans-serif", 12).into_font(),
         vec![false],
         None,
         None,
@@ -476,6 +480,7 @@ pub fn isothermal_core_collapse_background(
             "r (kpc)",
             "n_H (num / kpc^3)",
             vec![None],
+            ("sans-serif", 12).into_font(),
             vec![false],
             None,
             None,
@@ -509,6 +514,7 @@ pub fn isothermal_core_collapse_background(
             "r (arcmin)",
             "n_H (num / cm^2)",
             vec![None],
+            ("sans-serif", 12).into_font(),
             vec![false],
             None,
             None,
@@ -541,6 +547,7 @@ pub fn evolution_profile(
     anchor_params: &[f64; 4],
     data: &Vec<(f64, f64)>,
     data_y_err: &Vec<(f64, f64)>,
+    font: FontDesc<'static>,
 ) {
     let halo = Halo::NFW(anchor_params[0], anchor_params[1]);
     let bounds = (0.01 * anchor_params[1], halo.r_crit());
@@ -598,6 +605,7 @@ pub fn evolution_profile(
     )));
     let mut snapshot_params = anchor_params.clone();
     for tau in tau_snapshots {
+        dbg!(tau);
         snapshot_params[2] = tau;
         // Note I don't reset snapshot rho_c between snapshots as snapshots are likely to be closer to each other than the anchor point
         let (mut snapshot_gas_rho_points, mut snapshot_total_mass) =
@@ -636,10 +644,11 @@ pub fn evolution_profile(
         &angular_points,
         &gas_rho_points_vec,
         "figures/evolution.svg",
-        "cloud evol",
+        "Evolution of Cloud-9-like Halo",
         "r (kpc)",
         "rho (M_sun kpc^-3)",
         legends,
+        font,
         dashed,
         Some(data),
         Some(data_y_err),
@@ -694,7 +703,9 @@ mod tests {
                 "r (kpc)",
                 "% err",
                 vec![None],
+                ("sans-serif", 12).into_font(),
                 vec![false],
+                None,
                 None,
             )
             .unwrap();
@@ -743,7 +754,9 @@ mod tests {
                 "r (kpc)",
                 "% err",
                 vec![None],
+                ("sans-serif", 12).into_font(),
                 vec![false],
+                None,
                 None,
             )
             .unwrap();

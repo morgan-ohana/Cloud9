@@ -1,5 +1,8 @@
+use std::path::Path;
+use std::sync::OnceLock;
 use std::{f64::consts::PI, str::FromStr};
 
+use crate::concentration_table::*;
 use crate::constants::*;
 
 pub enum Halo {
@@ -140,21 +143,17 @@ pub enum McrSource {
     DiemerJoyce2019,
 }
 
+static DIEMER_JOYCE_TABLE: OnceLock<MassConcentrationTable> = OnceLock::new();
+
+pub fn init_diemer_joyce<P: AsRef<Path>>(path: P) -> Result<(), String> {
+    // OnceLock::set fails if already initialised — that's fine, just ignore it.
+    let _ = DIEMER_JOYCE_TABLE.set(MassConcentrationTable::from_file(path)?);
+    Ok(())
+}
+
 pub fn deviation(m200: f64, c200: f64, source: McrSource) -> f64 {
-    match source {
-        McrSource::DuttonMaccio2014 => {
-            let a = 0.905;
-            let b = -0.101;
-            let sigma_log10c = 0.11; // intrinsic scatter
-
-            let median_log10c = b * (m200 * HH / 1e12).log10() + a;
-
-            (c200.log10() - median_log10c) / sigma_log10c
-        }
-        McrSource::DiemerJoyce2019 => {
-            todo!();
-        }
-    }
+    let (median_log10c, sigma_log10c) = mass_concentration_relation(m200, source);
+    (c200.log10() - median_log10c) / sigma_log10c
 }
 
 pub fn mass_concentration_relation(m200: f64, source: McrSource) -> (f64, f64) {
@@ -172,35 +171,37 @@ pub fn mass_concentration_relation(m200: f64, source: McrSource) -> (f64, f64) {
             (mean_log10c, sigma_log10c)
         }
         McrSource::DiemerJoyce2019 => {
-            todo!();
-            // let sigma = ;
-            // let nu = 1.686 / sigma;
-
-            // // Params for mean
-            // let kappa = 0.42;
-            // let a_0 = 2.37;
-            // let a_1 = 1.74;
-            // let b_0 = 3.39;
-            // let b_1 = 1.82;
-            // let c_alpha = 0.20;
-
-            // let alpha_eff = 0.5; // at z = 0
-
-            // let cap_a = a_0 * (1.0 + a_1 * (n_eff + 3.0));
-            // let cap_b = b_0 * (1.0 + b_1 * (n_eff + 3.0));
-            // let cap_c = 1.0 - c_alpha * (1.0 - alpha_eff);
-
-            // let term = cap_a *(1.0 + (nu.powi(2)/ cap_b)) / nu;
-            // let cap_g = ;
-
-            // let mean_c
+            // m200 is in Msun; the table expects Msun/h.
+            let mass_msun_h = m200 / HH;
+            let c = diemer_joyce_table()
+                .concentration(mass_msun_h)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "DiemerJoyce2019: mass {:.3e} Msun/h is outside the table range",
+                        mass_msun_h
+                    )
+                });
+            let median_log10c = c.log10();
+            (median_log10c, DIEMER_JOYCE_SCATTER)
         }
     }
+}
+
+#[inline]
+fn diemer_joyce_table() -> &'static MassConcentrationTable {
+    DIEMER_JOYCE_TABLE
+        .get()
+        .expect("DiemerJoyce2019: call init_diemer_joyce(path) before querying")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setup() {
+        // Idempotent — safe to call from multiple tests.
+        init_diemer_joyce("concentration_table.bin").expect("load table");
+    }
 
     #[test]
     fn rs_rhos_to_m200_c200_conversion() {
@@ -225,5 +226,38 @@ mod tests {
         let halo = Halo::NFW(240.0 * RHOCRIT, 4.2);
         let r_crit = halo.r_crit();
         assert!((r_crit - 23.3785).abs() < 1e-4);
+    }
+
+    #[test]
+    fn diemer_joyce_median_plausible() {
+        setup();
+        let (log10c, sigma) = mass_concentration_relation(1e12, McrSource::DiemerJoyce2019);
+        let c = 10_f64.powf(log10c);
+        println!("c(10^12 Msun) = {c:.3},  sigma = {sigma}");
+        assert!((3.0..20.0).contains(&c));
+        assert_eq!(sigma, DIEMER_JOYCE_SCATTER);
+    }
+
+    #[test]
+    fn deviation_at_median_is_zero() {
+        setup();
+        let m200 = 1e11; // Msun
+        let (log10c, _) = mass_concentration_relation(m200, McrSource::DiemerJoyce2019);
+        let c_median = 10_f64.powf(log10c);
+        let dev = deviation(m200, c_median, McrSource::DiemerJoyce2019);
+        assert!(
+            dev.abs() < 1e-10,
+            "deviation at median should be ~0, got {dev}"
+        );
+    }
+
+    #[test]
+    fn dutton_maccio_unchanged() {
+        // Regression guard — make sure the DM14 arm is untouched.
+        let (log10c, sigma) = mass_concentration_relation(1e12, McrSource::DuttonMaccio2014);
+        let c = 10_f64.powf(log10c);
+        println!("DM14 c(10^12 Msun) = {c:.3}");
+        assert!((3.0..20.0).contains(&c));
+        assert_eq!(sigma, 0.11);
     }
 }

@@ -4,6 +4,9 @@ use std::f64::consts::PI;
 pub const RHO_IGM: f64 = 133.02; // mean density of universe M_sun / kpc^3
 pub const UVB_TEMP: f64 = 1e4; //FIND REAL VALUE
 
+// MCR
+pub const DIEMER_JOYCE_SCATTER: f64 = 0.16; // intrinsic scatter in log10(c), Diemer & Joyce 2019
+
 // Physical Constants
 pub const GG: f64 = 4.301e-6; // Newton constant km^2 kpc / Msun s^2
 pub const M_PROTON: f64 = 8.41e-58; // Proton mass in Msun

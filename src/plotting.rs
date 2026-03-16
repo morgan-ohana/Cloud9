@@ -2,12 +2,37 @@ use plotters::coord::Shift;
 use plotters::coord::ranged1d::ValueFormatter;
 use plotters::element::DashedPathElement;
 use plotters::prelude::*;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::constants::*;
 use crate::halo::{McrSource, deviation, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
 use std::arch::x86_64::_SIDD_MASKED_POSITIVE_POLARITY;
 use std::f64::consts::PI;
 use std::ops::Sub;
+
+//Paper
+// const LABEL_WIDTH: u32 = 30;
+// const Y_LABEL_PAD: u32 = 15;
+// const GAP: u32 = 5;
+//Presentation
+const X_LABEL_WIDTH: u32 = 30; //60;
+const X_LABEL_PAD: u32 = 15; //50;
+const Y_LABEL_WIDTH: u32 = 60;
+const Y_LABEL_PAD: u32 = 50;
+const GAP: u32 = 15;
+
+fn fmt_num(num: &f64) -> String {
+    if num.abs() <= 1e-100 {
+        // Probably true 0
+        return format!("0");
+    }
+
+    if num.abs() >= 1000.0 || num.abs() <= 0.1 {
+        format!("{:.1e}", num)
+    } else {
+        format!("{:.1}", num)
+    }
+}
 
 pub fn plot_functions(
     x_points: &Vec<f64>,
@@ -17,6 +42,7 @@ pub fn plot_functions(
     xlabel: &str,
     ylabel: &str,
     legends: Vec<Option<String>>,
+    font: FontDesc<'static>,
     dashed: Vec<bool>,
     data: Option<&Vec<(f64, f64)>>,
     data_y_err: Option<&Vec<(f64, f64)>>,
@@ -33,7 +59,7 @@ pub fn plot_functions(
         None => x_points[0]..x_points[x_points.len() - 1],
     };
 
-    let x_range = x_points[0]..x_points[x_points.len() - 1];
+    //let x_range = x_points[0]..x_points[x_points.len() - 1];
 
     match data {
         Some(data_points) => {
@@ -95,28 +121,18 @@ pub fn plot_functions(
     let mut chart = ChartBuilder::on(&root)
         .caption(title, ("sans-serif", 40))
         .margin(10)
-        .x_label_area_size(30)
-        .y_label_area_size(60)
+        .x_label_area_size(40) //30)
+        .y_label_area_size(100) //60)
         .build_cartesian_2d(x_range, y_range)?;
 
     chart
         .configure_mesh()
         .x_desc(xlabel) // X-axis label
         .y_desc(ylabel) // Y-axis label
-        .x_label_formatter(&|x| {
-            if x.abs() >= 1000.0 || x.abs() <= 0.1 {
-                format!("{:.1e}", x)
-            } else {
-                format!("{:.1}", x)
-            }
-        })
-        .y_label_formatter(&|y| {
-            if y.abs() >= 1000.0 || y.abs() <= 0.1 {
-                format!("{:.1e}", y)
-            } else {
-                format!("{:.1}", y)
-            }
-        })
+        .x_label_style(font.clone())
+        .y_label_style(font.clone())
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
         .draw()?;
 
     let mut plot_profiles: Vec<Vec<(f64, f64)>> = Vec::with_capacity(y_points.len());
@@ -181,6 +197,7 @@ pub fn plot_functions(
         // Configure and draw legend
         chart
             .configure_series_labels()
+            .label_font(font)
             .position(SeriesLabelPosition::UpperRight)
             .background_style(&WHITE.mix(0.8))
             .border_style(&BLACK)
@@ -231,12 +248,13 @@ pub fn create_mcr_deviation_plot(
     output_path: &str,
     bounds: &[f64; 2],
     marked_values: &[f64],
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut deviation_chain = Vec::with_capacity(chain.len());
     let mut mean_deviation = 0.0;
     let mut mean_square_deviation = 0.0;
     for params in chain {
-        let deviation = deviation(params[0], params[1], McrSource::DuttonMaccio2014);
+        let deviation = deviation(params[0], params[1], McrSource::DiemerJoyce2019);
 
         mean_deviation += deviation;
         mean_square_deviation += deviation.powi(2);
@@ -257,13 +275,19 @@ pub fn create_mcr_deviation_plot(
     root.fill(&WHITE)?;
 
     plot_histogram(
-        &root.margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5),
+        &root.margin(
+            5,
+            5 + X_LABEL_WIDTH - X_LABEL_PAD,
+            5 + Y_LABEL_WIDTH - Y_LABEL_PAD,
+            5,
+        ),
         &deviation_chain,
-        "deviation from cosmological median",
+        "deviation from cosmological mean",
         (4, 4),
         &bounds,
         &marked_values,
         None,
+        font,
     )?;
 
     root.present()?;
@@ -285,6 +309,7 @@ pub fn create_cross_section_plot(
     output_path: &str,
     bounds: &[f64; 2],
     marked_values: &[f64],
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut t_sigma_m_chain = Vec::with_capacity(chain.len());
     let mut mean_log_sigma = 0.0;
@@ -318,13 +343,19 @@ pub fn create_cross_section_plot(
     root.fill(&WHITE)?;
 
     plot_histogram(
-        &root.margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5),
+        &root.margin(
+            5,
+            5 + X_LABEL_WIDTH - X_LABEL_PAD,
+            5 + Y_LABEL_WIDTH - Y_LABEL_PAD,
+            5,
+        ),
         &t_sigma_m_chain,
         "log(t sigma/m)",
         (4, 4),
         &bounds,
         &marked_values,
         None, //Some(&[&prob_dens]),
+        font,
     )?;
 
     root.present()?;
@@ -427,8 +458,6 @@ pub fn create_chain_trace_plots(
     Ok(())
 }
 
-const LABEL_WIDTH: u32 = 30;
-const Y_LABEL_PAD: u32 = 15;
 const LOG_SCALE: [bool; 5] = [true, false, false, true, false]; // [m200, c200, tau, rho_c, t sigma/m], sigma does not occur in chains or corner plot it's just here so histogram can be reused
 pub fn create_corner_plot(
     chain: &[[f64; 4]],
@@ -436,6 +465,7 @@ pub fn create_corner_plot(
     param_names: &[&str; 4],
     output_path: &str,
     bounds: &[[f64; 2]; 4],
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Extract parameter columns
     let mut params: Vec<Vec<f64>> = vec![Vec::new(); 4];
@@ -449,23 +479,35 @@ pub fn create_corner_plot(
     let svg_path = &(output_path.clone() + ".svg");
     let pdf_path = &(output_path.clone() + ".pdf");
     // Create plot area
-    let root = SVGBackend::new(svg_path, (1600, 1600)).into_drawing_area();
+
+    // Width = Height. Demand square
+    let plot_width = 1600;
+    let root_width = plot_width + (2 * X_LABEL_WIDTH) + 10 + (GAP * 4);
+    let root_height = plot_width + (2 * Y_LABEL_WIDTH) + 10 + (GAP * 4);
+
+    let root = SVGBackend::new(svg_path, (root_width, root_height)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let plot_width = 1600 - LABEL_WIDTH - 5;
-
     let x_break_points = [
-        plot_width / 4 + Y_LABEL_PAD,
-        plot_width / 2 + Y_LABEL_PAD,
-        3 * plot_width / 4 + Y_LABEL_PAD,
+        (0.25 * plot_width as f64) as u32 + (2 * X_LABEL_WIDTH),
+        (0.5 * plot_width as f64) as u32 + (2 * X_LABEL_WIDTH) + GAP,
+        (0.75 * plot_width as f64) as u32 + (2 * X_LABEL_WIDTH) + (2 * GAP),
     ];
-    let y_break_points = [plot_width / 4, plot_width / 2, 3 * plot_width / 4];
+    let y_break_points = [
+        (0.25 * plot_width as f64) as u32,
+        (0.5 * plot_width as f64) as u32 + GAP,
+        (0.75 * plot_width as f64) as u32 + (2 * GAP),
+    ];
 
     // Split into 4x4 subplots
     let sub_areas = root
-        .margin(5, 5 + LABEL_WIDTH, 5 + LABEL_WIDTH - Y_LABEL_PAD, 5)
+        .margin(
+            5,
+            5 + X_LABEL_WIDTH - X_LABEL_PAD,
+            5 + Y_LABEL_WIDTH - Y_LABEL_PAD,
+            5,
+        )
         .split_by_breakpoints(x_break_points, y_break_points);
-    //.split_evenly((num_params, num_params));
 
     let num_params = 4;
     // Plot each cell
@@ -485,6 +527,7 @@ pub fn create_corner_plot(
                     &bounds[row],
                     &marked_values,
                     None,
+                    font.clone(),
                 )?;
             } else if row > col {
                 // Lower triangle: 2D scatter/density
@@ -498,10 +541,11 @@ pub fn create_corner_plot(
                     (row, col),
                     &bounds,
                     &marked_2d,
+                    font.clone(),
                 )?;
             } else {
                 // Upper triangle: Correlation/contour or leave empty
-                plot_correlation(drawing_area, &params[col], &params[row])?;
+                plot_correlation(drawing_area, &params[col], &params[row], font.clone())?;
             }
         }
     }
@@ -528,12 +572,11 @@ fn plot_histogram(
     bounds: &[f64; 2],
     marked_values: &[f64],
     extra_functions: Option<&[&dyn Fn(f64) -> f64]>,
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Calculate bins
     let min = bounds[0];
     let max = bounds[1];
-    // let min = data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    // let max = data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     let n_bins = 500;
     let edges = {
@@ -592,15 +635,15 @@ fn plot_histogram(
     let mut chart_builder = ChartBuilder::on(area);
 
     if col == 0 || col == 4 {
-        chart_builder.y_label_area_size(LABEL_WIDTH + Y_LABEL_PAD);
+        chart_builder.y_label_area_size(Y_LABEL_WIDTH + Y_LABEL_PAD);
     } else {
-        chart_builder.margin_left(LABEL_WIDTH);
+        chart_builder.margin_left(GAP);
     }
 
     if row == 3 || row == 4 {
-        chart_builder.x_label_area_size(LABEL_WIDTH);
+        chart_builder.x_label_area_size(X_LABEL_WIDTH + X_LABEL_PAD);
     } else {
-        chart_builder.margin_bottom(LABEL_WIDTH);
+        chart_builder.margin_bottom(GAP);
     }
 
     match LOG_SCALE[row] {
@@ -609,7 +652,14 @@ fn plot_histogram(
                 //.caption(param_name, ("sans-serif", 15).into_font())
                 .build_cartesian_2d((min..max).log_scale(), 0.0..max_density * 1.1)?;
 
-            draw_hist_content(&mut chart, param_name, &density, &max_density, &edges)?;
+            draw_hist_content(
+                &mut chart,
+                param_name,
+                &density,
+                &max_density,
+                &edges,
+                font.clone(),
+            )?;
 
             // Draw marked values with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -639,6 +689,7 @@ fn plot_histogram(
             // Draw Legend
             chart
                 .configure_series_labels()
+                .label_font(font)
                 .position(SeriesLabelPosition::UpperRight)
                 .background_style(&WHITE.mix(0.8))
                 .border_style(&BLACK)
@@ -649,7 +700,14 @@ fn plot_histogram(
                 //.caption(param_name, ("sans-serif", 15).into_font())
                 .build_cartesian_2d(min..max, 0.0..max_density * 1.1)?;
 
-            draw_hist_content(&mut chart, param_name, &density, &max_density, &edges)?;
+            draw_hist_content(
+                &mut chart,
+                param_name,
+                &density,
+                &max_density,
+                &edges,
+                font.clone(),
+            )?;
 
             // Draw marked values with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -679,6 +737,7 @@ fn plot_histogram(
             // Draw Legend
             chart
                 .configure_series_labels()
+                .label_font(font)
                 .position(SeriesLabelPosition::UpperRight)
                 .background_style(&WHITE.mix(0.8))
                 .border_style(&BLACK)
@@ -698,25 +757,17 @@ fn draw_hist_content<
     density: &Vec<f64>,
     max_density: &f64,
     edges: &Vec<f64>,
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     chart
         .configure_mesh()
+        .x_label_style(font.clone())
         .x_desc(param_name) // X-axis label
+        .y_label_style(font.clone())
         .y_desc("Probability Density") // Y-axis label
-        .x_label_formatter(&|x| {
-            if x.abs() >= 1000.0 || x.abs() <= 0.01 {
-                format!("{:.1e}", x)
-            } else {
-                format!("{:.1}", x)
-            }
-        })
-        .y_label_formatter(&|y| {
-            if y.abs() >= 1000.0 || y.abs() <= 0.01 {
-                format!("{:.1e}", y)
-            } else {
-                format!("{:.1}", y)
-            }
-        })
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .label_style(font.clone())
         .draw()?;
 
     // Plot histogram bars
@@ -736,6 +787,7 @@ fn draw_hist_content<
 
     let mode_idx = bins[0].0;
     let mode_point = 0.5 * (edges[mode_idx] + edges[mode_idx + 1]);
+    println!("Mode {param_name} = {:.5e}", mode_point);
 
     let mut cumulative_probability = 0.0;
     let sigma_levels = [0.6827, 0.9545, 0.9973];
@@ -789,8 +841,10 @@ fn draw_hist_content<
             &BLACK,
         )))?
         .label(format!(
-            "{param_name} = {mode_point:.3}  ({:.3}, {:.3})",
-            interval_edges[0].0, interval_edges[0].1
+            "{param_name} = {}  ({}, {})",
+            fmt_num(&mode_point),
+            fmt_num(&interval_edges[0].0),
+            fmt_num(&interval_edges[0].1)
         ))
         .legend(move |(x, y)| {
             PathElement::new(
@@ -834,6 +888,7 @@ fn plot_2d_scatter(
     (row, col): (usize, usize),
     bounds: &[[f64; 2]; 4],
     marked_points_2d: &[(f64, f64)],
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let [x_min, x_max] = bounds[col];
     let [y_min, y_max] = bounds[row];
@@ -841,15 +896,15 @@ fn plot_2d_scatter(
     let mut chart_builder = ChartBuilder::on(area);
 
     if col == 0 {
-        chart_builder.y_label_area_size(LABEL_WIDTH + Y_LABEL_PAD);
+        chart_builder.y_label_area_size(Y_LABEL_WIDTH + Y_LABEL_PAD);
     } else {
-        chart_builder.margin_left(LABEL_WIDTH);
+        chart_builder.margin_left(GAP);
     }
 
     if row == 3 {
-        chart_builder.x_label_area_size(LABEL_WIDTH);
+        chart_builder.x_label_area_size(X_LABEL_WIDTH + X_LABEL_PAD);
     } else {
-        chart_builder.margin_bottom(LABEL_WIDTH);
+        chart_builder.margin_bottom(GAP);
     }
 
     match (LOG_SCALE[col], LOG_SCALE[row]) {
@@ -857,7 +912,7 @@ fn plot_2d_scatter(
             let mut chart = chart_builder
                 .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
-            draw_scatter_content(&mut chart, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col), font)?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -874,7 +929,7 @@ fn plot_2d_scatter(
             let mut chart =
                 chart_builder.build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
-            draw_scatter_content(&mut chart, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col), font)?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -891,7 +946,7 @@ fn plot_2d_scatter(
             let mut chart =
                 chart_builder.build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
-            draw_scatter_content(&mut chart, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col), font)?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -907,7 +962,7 @@ fn plot_2d_scatter(
         (false, false) => {
             let mut chart = chart_builder.build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-            draw_scatter_content(&mut chart, param_names, (row, col))?;
+            draw_scatter_content(&mut chart, param_names, (row, col), font)?;
 
             // Draw marked points with different colors
             let colors = [&GREEN, &RED, &BLUE, &MAGENTA];
@@ -935,25 +990,17 @@ fn draw_scatter_content<
     chart: &mut ChartContext<SVGBackend, Cartesian2d<X, Y>>,
     param_names: &[&str; 4],
     (row, col): (usize, usize),
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut mesh = chart.configure_mesh();
 
-    mesh.x_desc(param_names[col]) // X-axis label
+    mesh.x_label_style(font.clone())
+        .x_desc(param_names[col]) // X-axis label
+        .y_label_style(font.clone())
         .y_desc(param_names[row]) // Y-axis label
-        .x_label_formatter(&|x| {
-            if x.abs() >= 1000.0 || x.abs() <= 0.01 {
-                format!("{:.1e}", x)
-            } else {
-                format!("{:.1}", x)
-            }
-        })
-        .y_label_formatter(&|y| {
-            if y.abs() >= 1000.0 || y.abs() <= 0.01 {
-                format!("{:.1e}", y)
-            } else {
-                format!("{:.1}", y)
-            }
-        });
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .label_style(font.clone());
 
     mesh.draw()?;
 
@@ -987,30 +1034,47 @@ fn plot_kde<
         1.06 * sigma * n.powf(-0.2)
     };
 
+    // 1. Precalculate logarithms once to avoid redundant computations
+    let log_data: Option<Vec<f64>> = if log_scale {
+        Some(data.iter().map(|x| x.ln()).collect())
+    } else {
+        None
+    };
+
     let n_points = 200;
 
-    let mut kde_points = Vec::new();
-    for i in 0..n_points {
-        let x = match log_scale {
-            true => (min.ln() + (max.ln() - min.ln()) * i as f64 / (n_points - 1) as f64).exp(),
-            false => min + (max - min) * i as f64 / (n_points - 1) as f64,
-        };
+    // Pre-calculate the normalization factor
+    let norm_factor = data.len() as f64 * bandwidth * (2.0 * std::f64::consts::PI).sqrt();
 
-        let mut density = 0.0;
-        for &point in data {
-            let diff = match log_scale {
-                true => (x.ln() - point.ln()) / bandwidth,
-                false => (x - point) / bandwidth,
+    let mut kde_points: Vec<(f64, f64)> = (0..n_points)
+        .into_par_iter()
+        .map(|i| {
+            let x = match log_scale {
+                true => (min.ln() + (max.ln() - min.ln()) * i as f64 / (n_points - 1) as f64).exp(),
+                false => min + (max - min) * i as f64 / (n_points - 1) as f64,
             };
-            density += (-0.5 * diff * diff).exp();
-        }
 
-        density /= data.len() as f64 * bandwidth * (2.0 * std::f64::consts::PI).sqrt();
-        if log_scale {
-            density /= x; // Adjust for log scale
-        }
-        kde_points.push((x, density));
-    }
+            let mut density = 0.0;
+
+            if log_scale {
+                // 2. Compute x.ln() exactly once per KDE point
+                let ln_x = x.ln();
+                for &ln_point in log_data.as_ref().unwrap() {
+                    let diff = (ln_x - ln_point) / bandwidth;
+                    density += (-0.5 * diff * diff).exp();
+                }
+                density /= norm_factor * x; // Adjust for log scale
+            } else {
+                for &point in data {
+                    let diff = (x - point) / bandwidth;
+                    density += (-0.5 * diff * diff).exp();
+                }
+                density /= norm_factor;
+            }
+
+            (x, density)
+        })
+        .collect();
 
     chart.draw_series(LineSeries::new(kde_points, &RED))?;
 
@@ -1146,15 +1210,19 @@ fn plot_2d_contours(
     }
 
     let y_margin_width = match col {
-        0 => LABEL_WIDTH + Y_LABEL_PAD,
-        _ => LABEL_WIDTH,
+        0 => Y_LABEL_WIDTH + Y_LABEL_PAD,
+        _ => GAP,
+    };
+    let x_margin_width = match row {
+        3 => X_LABEL_WIDTH + X_LABEL_PAD,
+        _ => GAP,
     };
 
     match (LOG_SCALE[col], LOG_SCALE[row]) {
         (true, true) => {
             let mut chart = ChartBuilder::on(area)
                 .margin_left(y_margin_width)
-                .margin_bottom(LABEL_WIDTH)
+                .margin_bottom(x_margin_width)
                 .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())?;
 
             draw_contour_content(&mut chart, &density, &edges, grid_size)?;
@@ -1162,7 +1230,7 @@ fn plot_2d_contours(
         (true, false) => {
             let mut chart = ChartBuilder::on(area)
                 .margin_left(y_margin_width)
-                .margin_bottom(LABEL_WIDTH)
+                .margin_bottom(x_margin_width)
                 .build_cartesian_2d((x_min..x_max).log_scale(), y_min..y_max)?;
 
             draw_contour_content(&mut chart, &density, &edges, grid_size)?;
@@ -1170,7 +1238,7 @@ fn plot_2d_contours(
         (false, true) => {
             let mut chart = ChartBuilder::on(area)
                 .margin_left(y_margin_width)
-                .margin_bottom(LABEL_WIDTH)
+                .margin_bottom(x_margin_width)
                 .build_cartesian_2d(x_min..x_max, (y_min..y_max).log_scale())?;
 
             draw_contour_content(&mut chart, &density, &edges, grid_size)?;
@@ -1178,7 +1246,7 @@ fn plot_2d_contours(
         (false, false) => {
             let mut chart = ChartBuilder::on(area)
                 .margin_left(y_margin_width)
-                .margin_bottom(LABEL_WIDTH)
+                .margin_bottom(x_margin_width)
                 .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
             draw_contour_content(&mut chart, &density, &edges, grid_size)?;
@@ -1488,97 +1556,11 @@ fn draw_contours(
     Ok(())
 }
 
-fn draw_contour_around_level(
-    chart: &mut ChartContext<
-        SVGBackend,
-        Cartesian2d<impl Ranged<ValueType = f64>, impl Ranged<ValueType = f64>>,
-    >,
-    level: u32,
-    levels: &Vec<Vec<u32>>,
-    edges: &Vec<Vec<(f64, f64)>>,
-    grid_size: usize,
-    (row, col): (usize, usize),
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut points = Vec::new();
-
-    for i in 0..grid_size {
-        for j in 0..grid_size {
-            for a in i.saturating_sub(1)..=(i + 1).min(grid_size - 1) {
-                for b in j.saturating_sub(1)..=(j + 1).min(grid_size - 1) {
-                    if levels[i][j] != level {
-                        continue;
-                    }
-
-                    // contour edge in plot
-                    if levels[a][b] > level {
-                        // edge i lies between i and i-1 so for two neighbors the greater is the idx of the edge between them
-                        points.push(edges[i.max(a)][j.max(b)]);
-                    }
-
-                    // plot edge
-                    if i == 0 {
-                        points.push(edges[0][j]);
-                        points.push(edges[0][j + 1]);
-                    } else if i == grid_size - 1 {
-                        points.push(edges[grid_size][j]);
-                        points.push(edges[grid_size][j + 1]);
-                    }
-
-                    if j == 0 {
-                        points.push(edges[i][0]);
-                        points.push(edges[i + 1][0]);
-                    } else if j == grid_size - 1 {
-                        points.push(edges[i][grid_size]);
-                        points.push(edges[i + 1][grid_size]);
-                    }
-                }
-            }
-        }
-    }
-
-    // Calculate centroid
-    let (sum_x, sum_y) = points.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| {
-        let x_val = match LOG_SCALE[col] {
-            true => x.ln(),
-            false => x,
-        };
-        let y_val = match LOG_SCALE[row] {
-            true => y.ln(),
-            false => y,
-        };
-        (sx + x_val, sy + y_val)
-    });
-
-    let mut centroid = (sum_x / points.len() as f64, sum_y / points.len() as f64);
-
-    if LOG_SCALE[col] {
-        centroid.0 = centroid.0.exp()
-    }
-    if LOG_SCALE[row] {
-        centroid.1 = centroid.1.exp()
-    }
-
-    // Sort by angle relative to centroid
-    points.sort_by(|&(x1, y1), &(x2, y2)| {
-        let angle1 = (y1 - centroid.1).atan2(x1 - centroid.0);
-        let angle2 = (y2 - centroid.1).atan2(x2 - centroid.0);
-        angle1
-            .partial_cmp(&angle2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Close loop
-    points.push(points[0].clone());
-
-    chart.draw_series(std::iter::once(PathElement::new(points, &BLACK)))?;
-
-    Ok(())
-}
-
 fn plot_correlation(
     area: &DrawingArea<SVGBackend, Shift>,
     x_data: &[f64],
     y_data: &[f64],
+    font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Calculate Pearson correlation
     let n = x_data.len() as f64;
@@ -1601,22 +1583,20 @@ fn plot_correlation(
     let text = format!("ρ = {:.3}", correlation);
 
     let mut chart = ChartBuilder::on(area)
-        .margin_left(LABEL_WIDTH)
-        .margin_bottom(LABEL_WIDTH)
+        .margin_left(GAP)
+        .margin_bottom(GAP)
         .build_cartesian_2d(0.0..1.0, 0.0..1.0)?;
 
-    let label_fraction = LABEL_WIDTH as f64 / (area.dim_in_pixel().0 as f64);
-    let subplot_width = 1.0 - label_fraction;
+    let x_label_fraction = X_LABEL_WIDTH as f64 / (area.dim_in_pixel().0 as f64);
+    let y_label_fraction = Y_LABEL_WIDTH as f64 / (area.dim_in_pixel().0 as f64);
+    let subplot_width = 1.0 - x_label_fraction;
+    let subplot_height = 1.0 - y_label_fraction;
     let center_point = (
-        0.5 * subplot_width + label_fraction as f64,
-        0.5 * subplot_width + label_fraction as f64,
+        0.5 * subplot_width + x_label_fraction as f64,
+        0.5 * subplot_height + y_label_fraction as f64,
     );
 
-    chart.draw_series(std::iter::once(Text::new(
-        text,
-        center_point,
-        ("sans-serif", 20).into_font(),
-    )))?;
+    chart.draw_series(std::iter::once(Text::new(text, center_point, font)))?;
 
     // Color code by correlation strength
     let color = if correlation.abs() > 0.7 {
