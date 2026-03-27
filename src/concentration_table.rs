@@ -138,6 +138,6 @@ mod tests {
 
         // Out-of-range should return None
         assert!(table.concentration(1e5).is_none());
-        assert!(table.concentration(1e15).is_none());
+        assert!(table.concentration(1e20).is_none());
     }
 }

@@ -21,9 +21,9 @@ COSMOLOGY = "planck18"
 cosmology.setCosmology(COSMOLOGY)
 
 # ── Sampling ─────────────────────────────────────────────────────────────────
-N_POINTS   = 500
-LOG_M_MIN  = 8.0    # log10(M / [Msun/h])
-LOG_M_MAX  = 12.0
+N_POINTS   = 1000
+LOG_M_MIN  = 6.0    # log10(M / [Msun/h])
+LOG_M_MAX  = 15.0
 REDSHIFT   = 0.0
 MODEL      = "diemer19"
 MDEF       = "200c"   # mass definition expected by Diemer+19

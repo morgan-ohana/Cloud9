@@ -1,5 +1,4 @@
 use plotters::prelude::*;
-use rand::seq::SliceRandom;
 use std::f64::consts::PI;
 use std::fs;
 use std::path::Path;
@@ -16,6 +15,7 @@ use crate::halo::{
 };
 use crate::hydrostatics::{
     evolution_profile, isothermal_abg_background, isothermal_core_collapse_background,
+    relhic_temperature,
 };
 use crate::logging::{load_file, save_output, save_output_json};
 use crate::plotting::{
@@ -31,6 +31,7 @@ mod halo;
 mod hydrostatics;
 mod logging;
 mod plotting;
+mod temperature;
 
 fn ensure_dir_exists(path: &str) -> Result<(), std::io::Error> {
     let path = Path::new(path);
@@ -97,11 +98,18 @@ fn main() {
     );
 
     // Found by grad descent:
-    let sidm_fit_params = [
+    let sidm_fit_params_old = [
         6282772.676310997,
         2.8897601910357062,
         0.18438405302532834,
         54574.17044567845,
+    ];
+
+    let sidm_fit_params = [
+        1699598.068854349,
+        4.188800887645102,
+        0.1721663180521211,
+        116490.93147055767,
     ];
 
     // likelihood_slice_profile(
@@ -149,7 +157,7 @@ fn main() {
     let data_path = String::from("data/") + &file_name;
 
     let params: [f64; 4];
-    let bounds = [[1e8, 1e10], [0.0, 25.0], [0.0001, 1.0], [1e4, 1e6]];
+    let bounds = [[1e8, 5e9], [0.0, 25.0], [0.0, 1.0], [5e4, 3e5]];
 
     //let font: FontDesc<'static> = ("sans-serif", 12).into_font(); //Paper
     let font: FontDesc<'static> = ("sans-serif", 25).into_font(); //Presentations
@@ -167,7 +175,7 @@ fn main() {
             (m200_params, chain, likelihoods) = find_parameters_mcmc(
                 &data,
                 &data_y_err_bar,
-                [2e9, 10.0, 0.2, 5.5e4],
+                [1.7e9, 9.3, 0.18, 9.3e4], //[2e9, 10.0, 0.2, 5.5e4],
                 &bounds,
                 steps,
                 burn_in,
@@ -286,7 +294,7 @@ fn main() {
         create_mcr_deviation_plot(
             &chain,
             &(String::from("figures/deviation_plot_") + &file_name),
-            &[-8.0, 3.0],
+            &[-8.0, 1.0],
             &[grad_descent_deviation],
             font.clone(),
         )
@@ -296,14 +304,14 @@ fn main() {
             &chain,
             &(String::from("figures/cross_section_plot_") + &file_name),
             &[1e-1, 1e7],
-            &[grad_descent_sigma, mcmc_sigma],
+            &[grad_descent_sigma],
             font.clone(),
         )
         .unwrap();
 
         create_corner_plot(
             &chain,
-            &[&grad_descent_fit, &m200_params],
+            &[&grad_descent_fit],
             &["m200_0", "c200_0", "tau", "rho_c"],
             &(String::from("figures/corner_plot_") + &file_name),
             &bounds,
@@ -319,8 +327,9 @@ fn main() {
             params
         }
     } else {
-        //params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.2, 5e5], None);
-        params = cdm_fit_params;
+        params = find_parameters_gradient_descent(&data, sidm_fit_params, None, false);
+        // params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.5, 5e5], None, false);
+        //params = sidm_fit_params;
     }
 
     dbg!(params);
@@ -341,13 +350,13 @@ fn main() {
     let halo = Halo::NFW(params[0], params[1]);
 
     let fit = isothermal_core_collapse_background(
-        UVB_TEMP,
+        relhic_temperature,
         params[0],
         params[1],
         params[2],
         Some(params[3]),
         (0.1 * data[0].0, halo.r_crit()),
-        false,
+        true,
     );
 
     let halo = Halo::NFW(params[0], params[1]);
@@ -403,49 +412,4 @@ fn check_chain_behavior(chain: &[[f64; 4]]) {
             println!("Info: Very narrow posterior (well-constrained parameter)");
         }
     }
-}
-
-fn plot_distribution() {
-    let target_init_num_col_density = 1e19;
-    let target_init_col_density: f64 = target_init_num_col_density * M_PROTON * CM_IN_KPC.powi(2);
-    let temperature = UVB_TEMP;
-    let mut sound_speed_squared = temperature / (MP_OVER_KB); // kpc^2 / s^2
-    sound_speed_squared *= KM_IN_KPC.powi(2); // km^2 / s^2
-
-    // r_s = c_s / sqrt(4pi G rho_c)
-    // uniform sphere approx:
-    // Sigma ~ 2*r_s*rho_c = 2 c_s sqrt(rho_c / 4pi G) => rho_c ~ 4pi G * (Sigma / 2c_s)^2 = pi G Sigma^2 / c_s^2
-    // rho_c (kpc^-3) ~ pi G * (n_sigma (cm^-2) * MP * CMinKPC^2)^2 / c_s^2
-    // Units: [rho_c] = M_sun kpc^-3 = [G * sigma^2 / c_s^2] = km^2 kpc M_sun^-1 s^-2 * M_sun^2 kpc^-4 * [c_s]^-2 = km^2 kpc^-3 M_sun s^-2 * [c_s]^-2
-    // => [c_s^2] = km^2 kpc^-3 M_sun s^-2 / M_sun kpc^-3 = km^2 / s^2
-
-    let rho_center_approx = PI * GG * (target_init_col_density).powi(2) / sound_speed_squared;
-    let scale_radius = sound_speed_squared.sqrt() / (4.0 * PI * GG * rho_center_approx);
-    println!("Center rho set to: {rho_center_approx}");
-
-    // isothermal_abg_background(
-    //     temperature,
-    //     1.0,
-    //     3.0,
-    //     1.0,
-    //     0.0e7,
-    //     3.0,
-    //     (1e-1, 10.0*scale_radius),
-    //     rho_center_approx,
-    // );
-
-    let halo = Halo::NFW(3e7, 3.0);
-    dbg!(halo.r_crit());
-    dbg!(10.0 * scale_radius);
-    let r_max = halo.r_crit();
-
-    isothermal_core_collapse_background(
-        temperature,
-        3e7,
-        3.0,
-        0.2,
-        Some(rho_center_approx),
-        (1e-1, r_max),
-        true,
-    );
 }

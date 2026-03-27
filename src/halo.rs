@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn diemer_joyce_median_plausible() {
         setup();
-        let (log10c, sigma) = mass_concentration_relation(1e12, McrSource::DiemerJoyce2019);
+        let (log10c, sigma) = mass_concentration_relation(1e11, McrSource::DiemerJoyce2019);
         let c = 10_f64.powf(log10c);
         println!("c(10^12 Msun) = {c:.3},  sigma = {sigma}");
         assert!((3.0..20.0).contains(&c));

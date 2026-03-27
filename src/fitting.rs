@@ -1,18 +1,10 @@
-use core::num;
-use plotters::prelude::IntoLogRange;
 use plotters::style::IntoFont;
 use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Normal};
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
-use rkyv::de;
-use serde::de::value::UsizeDeserializer;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::constants::UVB_TEMP;
 use crate::halo::{Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation};
-use crate::hydrostatics::isothermal_core_collapse_background_at_points;
-use crate::plotting::create_chain_trace_plots;
+use crate::hydrostatics::{isothermal_core_collapse_background_at_points, relhic_temperature};
 use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_functions};
 
 #[derive(Clone)]
@@ -74,6 +66,8 @@ fn stretch_move_parallel(
 
             if proposal[k] < bounds[k][0] || proposal[k] > bounds[k][1] {
                 // if out of bounds just stop.
+                // dbg!("FUCK");
+                // dbg!(k);
                 // Walker won't move so this will correctly count as a rejection
                 return;
             }
@@ -342,10 +336,8 @@ pub fn find_parameters_gradient_descent(
     let mut rel_error_change = f64::MAX;
     let mut n = 0;
 
-    let temp = UVB_TEMP;
-
     while n < 10 || (error[error.len() - 1] > 0.01 && rel_error_change > 0.0 && n < 2000) {
-        error.push(get_rms_err_of_fit(temp, params, &data, false, inwards));
+        error.push(get_rms_err_of_fit(params, &data, false, inwards));
         rel_error_change =
             ((error[error.len() - 1] - error[error.len() - 2]) / error[error.len() - 2]).abs();
 
@@ -355,11 +347,11 @@ pub fn find_parameters_gradient_descent(
         for i in 0..params.len() {
             let mut increased_params = params.clone();
             increased_params[i] += 0.5 * grad_scale * params[i];
-            let increase_error = get_rms_err_of_fit(temp, increased_params, &data, false, inwards);
+            let increase_error = get_rms_err_of_fit(increased_params, &data, false, inwards);
 
             let mut decreased_params = params.clone();
             decreased_params[i] -= 0.5 * grad_scale * params[i];
-            let decrease_error = get_rms_err_of_fit(temp, decreased_params, &data, false, inwards);
+            let decrease_error = get_rms_err_of_fit(decreased_params, &data, false, inwards);
             grad[i] = (increase_error - decrease_error) / (grad_scale * params[i])
         }
 
@@ -453,7 +445,7 @@ fn log_likelihood(
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let model_points = isothermal_core_collapse_background_at_points(
-        UVB_TEMP,
+        relhic_temperature,
         params[0],
         params[1],
         params[2],
@@ -479,7 +471,6 @@ fn log_likelihood(
 }
 
 fn get_rms_err_of_fit(
-    temp: f64,
     mut params: [f64; 4],
     data: &Vec<(f64, f64)>,
     m200_input: bool,
@@ -499,7 +490,7 @@ fn get_rms_err_of_fit(
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let fit = isothermal_core_collapse_background(
-        temp,
+        relhic_temperature,
         params[0],
         params[1],
         params[2],

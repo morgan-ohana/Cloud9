@@ -59,7 +59,7 @@ pub fn plot_functions(
         None => x_points[0]..x_points[x_points.len() - 1],
     };
 
-    //let x_range = x_points[0]..x_points[x_points.len() - 1];
+    // let x_range = x_points[0]..x_points[x_points.len() - 1];
 
     match data {
         Some(data_points) => {
@@ -282,7 +282,7 @@ pub fn create_mcr_deviation_plot(
             5,
         ),
         &deviation_chain,
-        "deviation from cosmological mean",
+        "deviation from cosmological median",
         (4, 4),
         &bounds,
         &marked_values,
