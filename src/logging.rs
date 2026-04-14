@@ -1,13 +1,8 @@
-use rkyv::{Archive, Deserialize, Serialize, deserialize, rancor::Error};
+use rkyv::{deserialize, rancor::Error};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 
-#[derive(Archive, Deserialize, Serialize, Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct MCMCOutput {
-    pub best_params: [f64; 4],
-    pub chain: Vec<[f64; 4]>,
-    pub likelihoods: Vec<f64>,
-}
+use crate::mcmc::{ArchivedMCMCOutput, MCMCOutput};
 
 pub fn load_file(file_name: String) -> anyhow::Result<MCMCOutput> {
     let file = File::open(&file_name)?;
@@ -25,18 +20,7 @@ pub fn load_file(file_name: String) -> anyhow::Result<MCMCOutput> {
     Ok(output)
 }
 
-pub fn save_output(
-    file_name: String,
-    best_params: [f64; 4],
-    chain: Vec<[f64; 4]>,
-    likelihoods: Vec<f64>,
-) -> anyhow::Result<()> {
-    let output = MCMCOutput {
-        best_params,
-        chain,
-        likelihoods,
-    };
-
+pub fn save_output(file_name: String, output: MCMCOutput) -> anyhow::Result<()> {
     let file = File::create(&file_name)?;
     let mut writer = BufWriter::new(file);
 
@@ -49,18 +33,7 @@ pub fn save_output(
     Ok(())
 }
 
-pub fn save_output_json(
-    file_name: String,
-    best_params: [f64; 4],
-    chain: Vec<[f64; 4]>,
-    likelihoods: Vec<f64>,
-) -> anyhow::Result<()> {
-    let output = MCMCOutput {
-        best_params,
-        chain,
-        likelihoods,
-    };
-
+pub fn save_output_json(file_name: String, output: MCMCOutput) -> anyhow::Result<()> {
     let file = File::create(&file_name)?;
     let writer = BufWriter::new(file);
 

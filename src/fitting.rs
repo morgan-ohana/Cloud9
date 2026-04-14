@@ -1,281 +1,71 @@
 use plotters::style::IntoFont;
-use rand::{Rng, SeedableRng};
-use rand_pcg::Pcg64;
-use rayon::prelude::*;
+use std::f64::consts::PI;
 
-use crate::halo::{Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation};
-use crate::hydrostatics::{isothermal_core_collapse_background_at_points, relhic_temperature};
-use crate::{hydrostatics::isothermal_core_collapse_background, plotting::plot_functions};
+use crate::constants::*;
+use crate::halo::{
+    Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation, rs_rhos_to_m200_c200,
+};
+use crate::hydrostatics::{core_collapse_background_at_points, relhic_temperature};
+use crate::mcmc::*;
+use crate::{hydrostatics::core_collapse_background, plotting::plot_functions};
 
 #[derive(Clone)]
-struct Walker {
-    params: [f64; 4],
-    log_prob: f64,
-    rng: Pcg64,
+pub struct Data {
+    pub points: Vec<(f64, f64)>,
+    pub y_err: Vec<(f64, f64)>,
 }
 
-impl Walker {
-    fn lin_params(&self) -> [f64; 4] {
-        let mut lin_params = self.params.clone();
-        for s in 0..4 {
-            if LOG_STEP[s] {
-                lin_params[s] = 10.0_f64.powf(self.params[s])
-            }
-        }
+impl Data {
+    pub fn init() -> Self {
+        // Digitized from https://doi.org/10.3847/1538-4357/ad65d9 figure 4
 
-        lin_params
+        let points: Vec<(f64, f64)> = vec![
+            (0.15649748494408605, 15595734576138530000.0),
+            (0.18722388772639217, 15290963190523656000.0),
+            (0.2252243432550796, 14924613361774703000.0),
+            (0.26936457583283363, 14424784086219026000.0),
+            (0.32301280500582225, 13894659794863262000.0),
+            (0.38799031821006913, 13091285860285037000.0),
+            (0.4647330501352986, 12151824423121148000.0),
+            (0.5571917155289376, 11103690653134041000.0),
+            (0.6692414165028057, 9918955303017603000.0),
+            (0.801419168108796, 8606124456897346000.0),
+            (0.9595907722097119, 7014426686842890000.0),
+            (1.1500508076747187, 5250966932011177000.0),
+            (1.3771319397378698, 3511010519320841000.0),
+            (1.6463993031339876, 2293590617222256000.0),
+            (1.983419488324015, 1615272370298475800.0),
+        ];
+
+        let mut y_err: Vec<(f64, f64)> = vec![
+            (13732078146520720000.0, 17466755309837742000.0),
+            (13427854263419597000.0, 17229242059185019000.0),
+            (13003516161985374000.0, 16866179741318795000.0),
+            (12461619020702566000.0, 16448095066290774000.0),
+            (11695185329352206000.0, 15955195009096049000.0),
+            (10716711258649842000.0, 15359790383829522000.0),
+            (9581053603324199000.0, 14708083512691229000.0),
+            (8205955659163100000.0, 13903084887830374000.0),
+            (6793221053775176000.0, 12983171214351038000.0),
+            (5337519460514788000.0, 11805617040307792000.0),
+            (3880856839277999600.0, 10151147099502905000.0),
+            (2370604088405835000.0, 8104671612570444000.0),
+            (684370527200647700.0, 6345004385610885000.0),
+            (6e17, 5195521117287574000.0), // lower bound here doesn't matter, will be manually set below since not visible on plot
+            (6e17, 4312913465944557000.0), // ditto
+        ];
+
+        // Lower bound for unknown ones taken symmetrical in linear space
+        let n = y_err.len();
+        y_err[n - 1].0 = 2.0 * points[n - 1].1 - y_err[n - 1].1;
+        y_err[n - 2].0 = 2.0 * points[n - 2].1 - y_err[n - 2].1;
+
+        Self { points, y_err }
     }
 }
-
-fn sample_z(rng: &mut impl Rng, a: f64) -> f64 {
-    // pdf ~ 1/sqrt(z) [1/a, a]
-    // cdf ~ 2sqrt(z) + C [1/a, a]
-    // Normalizing on the range it must be: cdf = (sqrt(z) - 1/sqrt(a)) / (sqrt(a) - 1/sqrt(a))
-    // u is random sample from cdf, so u * (sqrt(a) - 1/sqrt(a)) + 1/sqrt(a) = sqrt(z)
-    // => z = (1/sqrt(a) + u * (sqrt(a) - 1/sqrt(a)))^2
-    let u: f64 = rng.random();
-    let b = 1.0 / a.sqrt();
-    (b + u * (a.sqrt() - b)).powi(2)
-}
-
-fn stretch_move_parallel(
-    walkers: &mut [Walker],
-    log_likelihood: &(impl Fn([f64; 4]) -> f64 + std::marker::Sync),
-    a: f64,
-    bounds: &[[f64; 2]; 4],
-) {
-    let n = walkers.len();
-    let d = 4;
-
-    // Copy walkers so reads are consistent during parallel update
-    let walkers_old = walkers.to_vec();
-
-    walkers.par_iter_mut().enumerate().for_each(|(i, walker)| {
-        // choose partner
-        let mut j = walker.rng.random_range(0..n);
-        while j == i {
-            j = walker.rng.random_range(0..n);
-        }
-
-        let z = sample_z(&mut walker.rng, a);
-        let mut proposal = walker.params;
-
-        for k in 0..d {
-            proposal[k] =
-                walkers_old[j].params[k] + z * (walker.params[k] - walkers_old[j].params[k]);
-
-            if proposal[k] < bounds[k][0] || proposal[k] > bounds[k][1] {
-                // if out of bounds just stop.
-                // dbg!("FUCK");
-                // dbg!(k);
-                // Walker won't move so this will correctly count as a rejection
-                return;
-            }
-        }
-
-        let proposed_log_prob = log_likelihood(proposal);
-
-        let log_accept = (d as f64 - 1.0) * z.ln() + proposed_log_prob - walker.log_prob;
-
-        if log_accept >= 0.0 || walker.rng.random::<f64>() < log_accept.exp() {
-            walker.params = proposal;
-            walker.log_prob = proposed_log_prob;
-        }
-    });
-}
-
-const LOG_STEP: [bool; 4] = [false, false, false, false];
-const LOG_PRIOR: [bool; 4] = [false, false, false, false];
-pub fn find_parameters_mcmc(
-    data: &Vec<(f64, f64)>,
-    y_error_bar: &Vec<(f64, f64)>,
-    initial_guess: [f64; 4],
-    lin_bounds: &[[f64; 2]; 4],
-    num_steps: usize,
-    burn_in: usize,
-    n_walkers: usize,
-    prior: Prior,
-) -> ([f64; 4], Vec<[f64; 4]>, Vec<f64>) {
-    let bounds = {
-        let mut bounds = lin_bounds.clone();
-        for s in 0..4 {
-            if LOG_STEP[s] {
-                bounds[s][0] = bounds[s][0].log10();
-                bounds[s][1] = bounds[s][1].log10();
-            }
-        }
-
-        bounds
-    };
-
-    let mut rng = Pcg64::seed_from_u64(42);
-    let a = 2.0;
-
-    // initialize walkers
-    let mut walkers = Vec::with_capacity(n_walkers);
-    for i in 0..n_walkers {
-        let mut p = initial_guess;
-        for s in 0..4 {
-            if LOG_STEP[s] {
-                p[s] = p[s].log10()
-            }
-            p[s] *= 1.0 + 0.1 * (rng.random::<f64>() - 0.5);
-        }
-        let lp = log_likelihood(p, data, y_error_bar, true, prior.clone());
-        walkers.push(Walker {
-            params: p,
-            log_prob: lp,
-            rng: Pcg64::seed_from_u64(42 + i as u64 * 7919),
-        });
-    }
-
-    let mut chains = vec![Vec::new(); n_walkers];
-    let mut likelihoods = vec![Vec::new(); n_walkers];
-
-    for step in 0..num_steps {
-        stretch_move_parallel(
-            &mut walkers,
-            &|p| log_likelihood(p, data, y_error_bar, true, prior.clone()),
-            a,
-            &bounds,
-        );
-
-        if step >= burn_in {
-            for w in 0..n_walkers {
-                chains[w].push(walkers[w].lin_params());
-                likelihoods[w].push(walkers[w].log_prob);
-            }
-        }
-
-        if step % 1000 == 0 {
-            println!("Step {}", step);
-        }
-    }
-
-    let (combined_chain, combined_likelihoods) = combine_chains((chains, likelihoods));
-
-    // Best params
-    let best_idx = combined_likelihoods
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(i, _)| i)
-        .unwrap();
-
-    let best_params = combined_chain[best_idx];
-
-    (best_params, combined_chain, combined_likelihoods)
-}
-
-pub fn combine_chains(
-    (chains, likelihoods): (Vec<Vec<[f64; 4]>>, Vec<Vec<f64>>),
-) -> (Vec<[f64; 4]>, Vec<f64>) {
-    let mut combined_chain = Vec::new();
-    let mut combined_likelihoods = Vec::new();
-
-    for c in 0..chains.len() {
-        combined_chain.extend_from_slice(&chains[c]);
-        combined_likelihoods.extend_from_slice(&likelihoods[c]);
-    }
-
-    (combined_chain, combined_likelihoods)
-}
-
-pub fn split_chains(
-    chain: &([f64; 4], Vec<[f64; 4]>, Vec<f64>),
-    length: usize,
-) -> Vec<([f64; 4], Vec<[f64; 4]>, Vec<f64>)> {
-    let num_chains = chain.1.len() / length;
-
-    // Ensure the combined data length is consistent
-    assert_eq!(chain.1.len() % length, 0);
-    assert_eq!(chain.2.len(), chain.1.len());
-
-    // Prepare containers for the split chains
-    let mut split_params = vec![Vec::with_capacity(length); num_chains];
-    let mut split_likelihoods = vec![Vec::with_capacity(length); num_chains];
-
-    // Distribute the combined parameter vectors and likelihoods
-    for (i, params) in chain.1.chunks(length).enumerate() {
-        split_params[i].extend_from_slice(params);
-    }
-    for (i, liks) in chain.2.chunks(length).enumerate() {
-        split_likelihoods[i].extend_from_slice(liks);
-    }
-
-    // Build the output chains, each with its own best parameters
-    let mut result = Vec::with_capacity(num_chains);
-    for i in 0..num_chains {
-        // Find index of maximum likelihood in this chain
-        let best_idx = split_likelihoods[i]
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(idx, _)| idx)
-            .expect("Chain should not be empty");
-
-        let best_params = split_params[i][best_idx];
-        result.push((
-            best_params,
-            std::mem::take(&mut split_params[i]),
-            std::mem::take(&mut split_likelihoods[i]),
-        ));
-    }
-
-    result
-}
-
-pub fn calculate_gelman_rubin(chains: &[([f64; 4], Vec<[f64; 4]>, Vec<f64>)]) -> Vec<f64> {
-    let m = chains.len() as f64;
-    let n = chains[0].1.len() as f64; // Samples per chain after burn-in
-
-    let mut r_hat = vec![0.0; 4];
-
-    for param_idx in 0..4 {
-        // Collect samples for this parameter
-        let mut param_samples = Vec::new();
-        for (_, chain, _) in chains {
-            let chain_samples: Vec<f64> = chain.iter().map(|p| p[param_idx]).collect();
-            param_samples.push(chain_samples);
-        }
-
-        // Calculate within-chain variance
-        let mut chain_means = Vec::new();
-        let mut within_var = 0.0;
-
-        for samples in &param_samples {
-            let mean: f64 = samples.iter().sum::<f64>() / n;
-            chain_means.push(mean);
-
-            let variance: f64 =
-                samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-            within_var += variance;
-        }
-        within_var /= m;
-
-        // Calculate between-chain variance
-        let overall_mean: f64 = chain_means.iter().sum::<f64>() / m;
-
-        let between_var: f64 = chain_means
-            .iter()
-            .map(|&mean| (mean - overall_mean).powi(2))
-            .sum::<f64>()
-            / (m - 1.0);
-
-        // Calculate pooled variance
-        let pooled_var = ((n - 1.0) / n) * within_var + between_var;
-
-        // R-hat statistic (should approach 1.0 as chains converge)
-        r_hat[param_idx] = (pooled_var / within_var).sqrt();
-    }
-
-    r_hat
-}
-
 const NAMES: [&str; 4] = ["m200", "c200", "tau", "rho_c"];
 pub fn likelihood_slice_profile(
-    data: &Vec<(f64, f64)>,
-    y_error_bar: &Vec<(f64, f64)>,
+    data: &Data,
     anchor_point: [f64; 4],
     slice_idx: usize,
     bounds: [f64; 2],
@@ -285,22 +75,12 @@ pub fn likelihood_slice_profile(
     let mut x_range = Vec::with_capacity(N);
     let mut likelihoods = Vec::with_capacity(N);
     for n in 0..N {
-        let x = match LOG_STEP[slice_idx] {
-            true => {
-                (bounds[0].ln() + (n as f64 / N as f64) * (bounds[1].ln() - bounds[0].ln())).exp()
-            }
-            false => bounds[0] + (n as f64 / N as f64) * (bounds[1] - bounds[0]),
-        };
+        let x = bounds[0] + (n as f64 / N as f64) * (bounds[1] - bounds[0]);
 
         let mut params = anchor_point.clone();
         params[slice_idx] = x;
-        for s in 0..4 {
-            if LOG_STEP[s] {
-                params[s] = params[s].log10();
-            }
-        }
 
-        let likelihood = log_likelihood(params, data, y_error_bar, true, prior.clone());
+        let likelihood = log_likelihood_full(&params[..], data, true, prior.clone());
 
         x_range.push(x);
         likelihoods.push(likelihood);
@@ -320,6 +100,134 @@ pub fn likelihood_slice_profile(
         None,
     )
     .unwrap()
+}
+
+#[derive(Clone, Debug)]
+pub enum Prior {
+    MassConcentrationRelation(McrSource),
+    None,
+}
+
+pub enum Cloud9MCMCCore {
+    Full(Data, Prior, [[f64; 2]; 4]),
+    FixedCrossSection(Data, Prior, [[f64; 2]; 3], f64),
+}
+
+impl Cloud9MCMCCore {
+    pub fn init(
+        data: Data,
+        prior: Prior,
+        bounds: [[f64; 2]; 4],
+        fixed_cross_section: Option<f64>,
+    ) -> Self {
+        match fixed_cross_section {
+            None => Cloud9MCMCCore::Full(data, prior, bounds),
+            Some(sigma) => {
+                let no_tau_bounds = [bounds[0], bounds[1], bounds[3]];
+                Cloud9MCMCCore::FixedCrossSection(data, prior, no_tau_bounds, sigma)
+            }
+        }
+    }
+}
+
+impl MCMCCore for Cloud9MCMCCore {
+    fn get_bounds(&self) -> &[[f64; 2]] {
+        match self {
+            Cloud9MCMCCore::Full(_, _, bounds) => &bounds[..],
+            Cloud9MCMCCore::FixedCrossSection(_, _, bounds, _sigma) => &bounds[..],
+        }
+    }
+
+    fn get_log_likelihood(&self, params: &[f64]) -> f64 {
+        match self {
+            Cloud9MCMCCore::Full(data, prior, _) => {
+                log_likelihood_full(params, data, true, prior.clone())
+            }
+            Cloud9MCMCCore::FixedCrossSection(data, prior, _, cross_section) => {
+                assert_eq!(params.len(), 3);
+
+                const AGE: f64 = 10.0;
+                let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+
+                // cm^2 g^-1 Gyr kpc Ms kpc^-3 (km^2 kpc Ms^-1 s^-2 Ms kpc^-3)^0.5 = cm^2 g^-1 Gyr Ms kpc^-2 km kpc^-1 s^-1 = (cm/kpc)^2 (km/kpc) (Gyr/s) (Ms/g)
+                let tau =
+                    (0.75 * cross_section * AGE * r_s * rho_s * (4.0 * PI * GG * rho_s).sqrt()
+                        / 150.0)
+                        * S_IN_GYR
+                        * G_IN_MSUN
+                        / (KM_IN_KPC * CM_IN_KPC.powi(2));
+
+                // if tau > 1.0 {
+                //     println!(
+                //         "tau = {tau} with M200 = {}, C200 = {}",
+                //         params[0], params[1]
+                //     )
+                // }
+
+                log_likelihood_full(&[rho_s, r_s, tau, params[2]], data, false, prior.clone())
+            }
+        }
+    }
+}
+
+fn log_likelihood_full(params: &[f64], data: &Data, m200_input: bool, prior: Prior) -> f64 {
+    assert_eq!(params.len(), 4);
+
+    let log_prior_likelihood = match prior {
+        Prior::MassConcentrationRelation(mcr_source) => {
+            if m200_input {
+                // received as m200, c200, tau, rho_c
+                let (mean_log10c, sigma_log10c) =
+                    mass_concentration_relation(params[0], mcr_source);
+                let log10c = params[1].log10();
+                -0.5 * ((log10c - mean_log10c) / sigma_log10c).powi(2)
+            } else {
+                // recieved as rhos rs tau rho_c
+                let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
+                let (mean_log10c, sigma_log10c) = mass_concentration_relation(m200, mcr_source);
+                let log10c = c200.log10();
+                -0.5 * ((log10c - mean_log10c) / sigma_log10c).powi(2)
+            }
+        }
+        Prior::None => 0.0,
+    };
+
+    let (r_s, rho_s) = if m200_input {
+        // recieved as m200, c200, tau, rho_c
+        m200_c200_to_rs_rhos(params[0], params[1])
+    } else {
+        (params[1], params[0])
+    };
+
+    let halo = Halo::NFW(rho_s, r_s);
+
+    let ang_points = data.points.iter().map(|(ang, _)| *ang).collect();
+
+    // must be passed as rho_s_0, r_s_0, tau, rho_c
+    let model_points = core_collapse_background_at_points(
+        relhic_temperature,
+        rho_s,
+        r_s,
+        params[2],
+        Some(params[3]),
+        (INNER_BOUND, halo.r_crit()), // Must go out to r_crit so I have whole halo for projected density
+        ang_points,
+    );
+
+    // compute X^2
+    let mut chi_squared = 0.0;
+    let mut sum_ln_sigma = 0.0;
+    for i in 0..data.points.len() {
+        let diff = model_points[i] - data.points[i].1;
+        let spread = match diff > 0.0 {
+            true => data.y_err[i].1 - data.points[i].1,
+            false => data.points[i].1 - data.y_err[i].0,
+        };
+        chi_squared += (diff / spread).powi(2);
+        sum_ln_sigma += spread.ln();
+    }
+
+    -0.5 * chi_squared - sum_ln_sigma + log_prior_likelihood
 }
 
 pub fn find_parameters_gradient_descent(
@@ -389,87 +297,6 @@ pub fn find_parameters_gradient_descent(
     params
 }
 
-#[derive(Clone, Debug)]
-pub enum Prior {
-    MassConcentrationRelation(McrSource),
-    None,
-}
-
-fn log_likelihood(
-    mut params: [f64; 4],
-    data: &Vec<(f64, f64)>,
-    y_error_bar: &Vec<(f64, f64)>,
-    m200_input: bool,
-    prior: Prior,
-) -> f64 {
-    // undo log scale and compute jacobian
-    let mut log_jacobian = 0.0;
-    for s in 0..4 {
-        if LOG_STEP[s] {
-            params[s] = 10.0_f64.powf(params[s]);
-
-            if !LOG_PRIOR[s] {
-                log_jacobian += params[s].ln();
-            }
-        }
-    }
-
-    let log_prior_likelihood = match prior {
-        Prior::MassConcentrationRelation(mcr_source) => {
-            let mut mcr_prior = 0.0;
-            if m200_input {
-                // received as m200, c200, tau, rho_c
-
-                // compute prior biases from mass-concetration-relation
-                let (mean_log10c, sigma_log10c) =
-                    mass_concentration_relation(params[0], mcr_source);
-                let log10c = params[1].log10();
-                mcr_prior = -0.5 * ((log10c - mean_log10c) / sigma_log10c).powi(2);
-            } else {
-                // No implemented Mcr prior for rho_s r_s space.
-            }
-
-            mcr_prior
-        }
-        Prior::None => 0.0,
-    };
-
-    if m200_input {
-        // recieved as m200, c200, tau, rho_c
-        (params[1], params[0]) = m200_c200_to_rs_rhos(params[0], params[1]);
-    }
-
-    let halo = Halo::NFW(params[0], params[1]);
-
-    let ang_points = data.iter().map(|(ang, _)| *ang).collect();
-
-    // must be passed as rho_s_0, r_s_0, tau, rho_c
-    let model_points = isothermal_core_collapse_background_at_points(
-        relhic_temperature,
-        params[0],
-        params[1],
-        params[2],
-        Some(params[3]),
-        (0.1 * data[0].0, halo.r_crit()), // Must go out to r_crit so I have whole halo for projected density
-        ang_points,
-    );
-
-    // compute X^2
-    let mut chi_squared = 0.0;
-    let mut sum_ln_sigma = 0.0;
-    for i in 0..data.len() {
-        let diff = model_points[i] - data[i].1;
-        let spread = match diff > 0.0 {
-            true => y_error_bar[i].1 - data[i].1,
-            false => data[i].1 - y_error_bar[i].0,
-        };
-        chi_squared += (diff / spread).powi(2);
-        sum_ln_sigma += spread.ln();
-    }
-
-    -0.5 * chi_squared - sum_ln_sigma + log_prior_likelihood + log_jacobian
-}
-
 fn get_rms_err_of_fit(
     mut params: [f64; 4],
     data: &Vec<(f64, f64)>,
@@ -489,13 +316,13 @@ fn get_rms_err_of_fit(
     };
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
-    let fit = isothermal_core_collapse_background(
+    let fit = core_collapse_background(
         relhic_temperature,
         params[0],
         params[1],
         params[2],
         rho_c,
-        (0.1 * data[0].0, halo.r_crit()),
+        (INNER_BOUND, halo.r_crit()),
         false,
     );
 

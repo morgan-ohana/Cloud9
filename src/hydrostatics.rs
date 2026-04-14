@@ -3,10 +3,10 @@ use std::sync::OnceLock;
 
 use plotters::style::{FontDesc, IntoFont};
 
-use crate::constants::*;
 use crate::halo::Halo;
 use crate::plotting::plot_functions;
 use crate::temperature::TnRelation;
+use crate::{constants::*, fitting};
 
 const SPACIAL_GRID_NUM: usize = 2000;
 
@@ -154,7 +154,7 @@ fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64>(
     external_field: Vec<f64>,
     temperature: T,
     rho_center: f64,
-) -> Vec<f64> {
+) -> (Vec<f64>, Vec<f64>) {
     let mut neutral_rho_points = Vec::with_capacity(r_points.len());
     let mut rho_points = Vec::with_capacity(r_points.len());
 
@@ -217,7 +217,7 @@ fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64>(
         neutral_rho_points.push(rho_points[i] * neutral_frac);
     }
 
-    neutral_rho_points
+    (neutral_rho_points, rho_points)
 }
 
 fn get_hydrostatic_profile_inwards<T: Fn(f64, f64) -> f64>(
@@ -294,7 +294,7 @@ fn get_hydrostatic_profile_inwards<T: Fn(f64, f64) -> f64>(
     gas_rho_points
 }
 
-pub fn isothermal_abg_background<T: Fn(f64, f64) -> f64>(
+pub fn abg_background<T: Fn(f64, f64) -> f64>(
     temperature: T,
     alpha: f64,
     beta: f64,
@@ -312,18 +312,18 @@ pub fn isothermal_abg_background<T: Fn(f64, f64) -> f64>(
 
     let dark_matter_rho_points = get_rho_points(rho, &r_points);
 
-    let rho_points = match rho_c {
+    let neutral_rho_points = match rho_c {
         None => get_hydrostatic_profile_inwards(&r_points, dark_matter_rho_points, temperature),
         Some(rho_c) => {
             let external_field = get_force_points(dark_matter_rho_points, &r_points);
-            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature, rho_c)
+            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature, rho_c).0
         }
     };
 
     let number_density = {
-        let mut num_density = Vec::with_capacity(rho_points.len());
-        for i in 0..rho_points.len() {
-            let num_dens = rho_points[i] / M_PROTON; // nH kpc^-3
+        let mut num_density = Vec::with_capacity(neutral_rho_points.len());
+        for i in 0..neutral_rho_points.len() {
+            let num_dens = neutral_rho_points[i] / M_PROTON; // nH kpc^-3
             num_density.push(num_dens / CM_IN_KPC.powi(3))
         }
         num_density
@@ -377,7 +377,7 @@ pub fn isothermal_abg_background<T: Fn(f64, f64) -> f64>(
     .unwrap();
 }
 
-pub fn isothermal_core_collapse_background_at_points<T: Fn(f64, f64) -> f64>(
+pub fn core_collapse_background_at_points<T: Fn(f64, f64) -> f64>(
     temperature: T,
     rho_s_0: f64,
     r_s_0: f64,
@@ -392,18 +392,18 @@ pub fn isothermal_core_collapse_background_at_points<T: Fn(f64, f64) -> f64>(
 
     let dark_matter_rho_points = get_rho_points(rho, &r_points);
 
-    let rho_points = match rho_c {
+    let neutral_rho_points = match rho_c {
         None => get_hydrostatic_profile_inwards(&r_points, dark_matter_rho_points, temperature),
         Some(rho_c) => {
             let external_field = get_force_points(dark_matter_rho_points, &r_points);
-            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature, rho_c)
+            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature, rho_c).0
         }
     };
 
     let number_density = {
-        let mut num_density = Vec::with_capacity(rho_points.len());
-        for i in 0..rho_points.len() {
-            num_density.push(rho_points[i] / M_PROTON)
+        let mut num_density = Vec::with_capacity(neutral_rho_points.len());
+        for i in 0..neutral_rho_points.len() {
+            num_density.push(neutral_rho_points[i] / M_PROTON)
         }
         num_density
     };
@@ -428,7 +428,7 @@ pub fn isothermal_core_collapse_background_at_points<T: Fn(f64, f64) -> f64>(
     column_density
 }
 
-pub fn isothermal_core_collapse_background<T: Fn(f64, f64) -> f64>(
+pub fn core_collapse_background<T: Fn(f64, f64) -> f64>(
     temperature: T,
     rho_s_0: f64,
     r_s_0: f64,
@@ -443,20 +443,20 @@ pub fn isothermal_core_collapse_background<T: Fn(f64, f64) -> f64>(
 
     let dark_matter_rho_points = get_rho_points(rho, &r_points);
 
-    let rho_points = match rho_c {
+    let neutral_rho_points = match rho_c {
         None => get_hydrostatic_profile_inwards(&r_points, dark_matter_rho_points, temperature),
         Some(rho_c) => {
             let external_field = get_force_points(dark_matter_rho_points, &r_points);
-            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature, rho_c)
+            get_hydrostatic_profile_outwards(&r_points, external_field, &temperature, rho_c).0
         }
     };
 
     //dbg!(&rho_points);
 
     let number_density = {
-        let mut num_density = Vec::with_capacity(rho_points.len());
-        for i in 0..rho_points.len() {
-            let num_dens = rho_points[i] / M_PROTON; // nH / kpc^-3
+        let mut num_density = Vec::with_capacity(neutral_rho_points.len());
+        for i in 0..neutral_rho_points.len() {
+            let num_dens = neutral_rho_points[i] / M_PROTON; // nH / kpc^-3
             num_density.push(num_dens / CM_IN_KPC.powi(3))
         }
         num_density
@@ -613,10 +613,9 @@ fn photo_ionization_rate(nh: f64, gamma_uvb: f64) -> f64 {
 }
 
 pub fn evolution_profile<T: Fn(f64, f64) -> f64>(
-    anchor_params: &[f64; 4],
+    anchor_params: &Vec<f64>,
     temperature: &T,
-    data: &Vec<(f64, f64)>,
-    data_y_err: &Vec<(f64, f64)>,
+    data: &fitting::Data,
     font: FontDesc<'static>,
 ) {
     let halo = Halo::NFW(anchor_params[0], anchor_params[1]);
@@ -624,21 +623,21 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64>(
     let r_points = get_r_points(bounds);
 
     fn get_profile_and_mass<T: Fn(f64, f64) -> f64>(
-        params: &[f64; 4],
+        params: &Vec<f64>,
         r_points: &Vec<f64>,
         temperature: &T,
     ) -> (Vec<f64>, f64) {
         let dm_rho = parametic_core_collapse(params[1], params[0], params[2]);
         let dm_rho_points = get_rho_points(dm_rho, r_points);
         let external_field = get_force_points(dm_rho_points, r_points);
-        let rho_gas_points =
+        let (neutral_rho_gas_points, full_rho_gas_points) =
             get_hydrostatic_profile_outwards(r_points, external_field, temperature, params[3]);
-        let total_mass = get_total_mass(&rho_gas_points, r_points);
+        let total_mass = get_total_mass(&full_rho_gas_points, r_points);
 
         let number_density = {
-            let mut num_density = Vec::with_capacity(rho_gas_points.len());
-            for i in 0..rho_gas_points.len() {
-                num_density.push(rho_gas_points[i] / M_PROTON)
+            let mut num_density = Vec::with_capacity(neutral_rho_gas_points.len());
+            for i in 0..neutral_rho_gas_points.len() {
+                num_density.push(neutral_rho_gas_points[i] / M_PROTON)
             }
             num_density
         };
@@ -660,7 +659,7 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64>(
 
     // get evolution snapshots
 
-    let tau_snapshots = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    let tau_snapshots = [0.0, 0.2, 0.4, 0.6, 0.7];
     let mut gas_rho_points_vec = Vec::with_capacity(tau_snapshots.len() + 1);
     let mut legends = Vec::with_capacity(tau_snapshots.len() + 1);
     gas_rho_points_vec.push(anchor_gas_rho_points);
@@ -686,7 +685,9 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64>(
             }
             dbg!(percent_diff);
             dbg!(snapshot_params[3]);
-            snapshot_params[3] -= percent_diff * anchor_params[3];
+            snapshot_params[3] =
+                snapshot_params[3].powf((1.0 - percent_diff).powf(1.0 / iter as f64));
+            // snapshot_params[3] -= percent_diff * anchor_params[3];
 
             (snapshot_gas_rho_points, snapshot_total_mass) =
                 get_profile_and_mass(&snapshot_params, &r_points, temperature);
@@ -695,7 +696,7 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64>(
         }
 
         gas_rho_points_vec.push(snapshot_gas_rho_points);
-        legends.push(Some(format!("tau = {}", tau)));
+        legends.push(Some(format!("τ = {}", tau)));
     }
 
     let angular_points = {
@@ -715,13 +716,13 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64>(
         &gas_rho_points_vec,
         "figures/evolution.svg",
         "Evolution of Cloud-9-like Halo",
-        "r (kpc)",
-        "rho (M_sun kpc^-3)",
+        "r (arcmin)",
+        "H₁ Column Density (cm⁻²)",
         legends,
         font,
         dashed,
-        Some(data),
-        Some(data_y_err),
+        Some(&data.points),
+        Some(&data.y_err),
     )
     .unwrap();
 }
@@ -892,5 +893,28 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn core_collapse_reproduce_nfw() {
+        let (rho_s_0, r_s_0) = (1e6, 4.2);
+        let tau: f64 = 0.0;
+        // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
+        let rho_s = rho_s_0
+            * (2.033 + 0.7381 * tau + 7.264 * tau.powi(5) - 12.73 * tau.powi(7)
+                + 9.915 * tau.powi(9)
+                + (1.0 - 2.033) * (tau + 0.001).ln() / (0.001_f64).ln());
+        let r_s = r_s_0
+            * (0.7178 - 0.1026 * tau + 0.2474 * tau.powi(2) - 0.4079 * tau.powi(3)
+                + (1.0 - 0.7178) * (tau + 0.001).ln() / (0.001_f64).ln());
+        let r_c = r_s_0
+            * (2.555 * tau.sqrt() - 3.632 * tau + 2.131 * tau.powi(2) - 1.415 * tau.powi(3)
+                + 0.4683 * tau.powi(4));
+
+        dbg!(rho_s, r_s, r_c);
+
+        if rho_s - rho_s_0 > 1e-5 || r_s - r_s_0 > 1e-5 || r_c > 1e-5 {
+            panic!("cored profile does not recover nfw at tau = 0")
+        }
     }
 }

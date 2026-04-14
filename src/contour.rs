@@ -1,6 +1,6 @@
 use crate::logging::write_cells_to_csv;
 
-pub fn get_3d_contour(chain: &[[f64; 4]], bounds: &[[f64; 2]; 4]) {
+pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4]) {
     let [[x_min, x_max], [y_min, y_max], [z_min, z_max], [_, _]] = bounds;
     // Simple 3D density estimation
     let grid_size = 100;

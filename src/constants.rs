@@ -1,6 +1,7 @@
 use std::f64::consts::PI;
 
 // System Values
+pub const INNER_BOUND: f64 = 0.015;
 pub const RHO_IGM: f64 = 133.02; // mean density of universe M_sun / kpc^3
 pub const DISTANCE: f64 = 4.6e3; // 4.6 MPC or 4660 KPC https://iopscience.iop.org/article/10.3847/1538-4357/acdcf5/pdf
 
