@@ -1,9 +1,10 @@
+use ensemble_mcmc::MCMCOutput;
 use plotters::prelude::*;
 
 use crate::constants::*;
 use crate::corner_plot::*;
 use crate::halo::{McrSource, deviation, m200_c200_to_rs_rhos};
-use crate::logging::load_file;
+// use crate::logging::load_file;
 use crate::utils::make_file_name;
 use std::f64::consts::PI;
 
@@ -260,8 +261,8 @@ pub fn create_cross_section_deviation_relation_plot(
     for cross_section in cross_sections {
         let file_name = make_file_name(num_walkers, steps, prior, &Some(*cross_section));
 
-        if let Ok(output) = load_file(String::from("data/") + &file_name + ".mcmc") {
-            let chain = output.chain();
+        if let Ok(output) = MCMCOutput::load(&(String::from("data/") + &file_name + ".mcmc")) {
+            let chain = output.chain;
 
             let mut deviation_chain = Vec::with_capacity(chain.len());
             let mut mean_deviation = 0.0;

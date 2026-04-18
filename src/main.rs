@@ -1,3 +1,4 @@
+use ensemble_mcmc::*;
 use plotters::prelude::*;
 use std::f64::consts::PI;
 use std::fs;
@@ -14,8 +15,8 @@ use crate::halo::{
 use crate::hydrostatics::{
     abg_background, core_collapse_background, evolution_profile, relhic_temperature,
 };
-use crate::logging::{load_file, save_output, save_output_json};
-use crate::mcmc::{MCMCOutput, mcmc};
+// use crate::logging::{load_file, save_output, save_output_json};
+// use crate::mcmc::{MCMCOutput, mcmc};
 use crate::plotting::{
     create_cross_section_deviation_relation_plot, create_cross_section_plot,
     create_mcr_deviation_plot, plot_functions,
@@ -30,7 +31,7 @@ mod fitting;
 mod halo;
 mod hydrostatics;
 mod logging;
-mod mcmc;
+// mod mcmc;
 mod plotting;
 mod temperature;
 mod utils;
@@ -64,6 +65,14 @@ fn main() {
     let burn_in = 1000;
     let num_walkers = 512;
     let steps = 100000;
+    let settings = MCMCSettings {
+        burn_in,
+        num_walkers,
+        num_steps: steps,
+        ..Default::default()
+    };
+
+    dbg!(settings);
 
     let fixed_cross_section = None; //Some(75.0);
 
@@ -120,7 +129,7 @@ fn main() {
 
     // Active Code
 
-    cdm_vs_sidm_fit_plot(&data);
+    // cdm_vs_sidm_fit_plot(&data);
 
     // create_cross_section_deviation_relation_plot(
     //     num_walkers,
@@ -135,13 +144,13 @@ fn main() {
     if mcmc_plots {
         let output: MCMCOutput;
         if let Some(filename) = premade {
-            output = load_file(filename).unwrap();
+            output = MCMCOutput::load(&filename).unwrap();
         } else {
             let mcmc_core = Cloud9MCMCCore::init(data.clone(), prior, bounds, fixed_cross_section);
-            output = mcmc(&mcmc_core, steps, burn_in, num_walkers);
+            output = mcmc(&mcmc_core, settings);
 
-            save_output(data_path.clone() + ".mcmc", output.clone()).unwrap();
-            save_output_json(data_path.clone() + ".json", output.clone()).unwrap();
+            output.save(&(data_path.clone() + ".mcmc")).unwrap();
+            output.save_as_json(&(data_path.clone() + ".json")).unwrap();
         }
 
         println!("Gelman-Rubin R-hat statistics: {:?}", output.gelman_rubin);
@@ -155,7 +164,7 @@ fn main() {
             println!("Chains appear to have converged (R-hat < 1.1)");
         }
 
-        let chain = output.chain();
+        let chain = output.chain;
 
         check_chain_behavior(&chain);
 
@@ -250,32 +259,32 @@ fn main() {
         //     .unwrap();
         // }
 
-        // match fixed_cross_section {
-        //     None => {
-        //         create_corner_plot(
-        //             &chain,
-        //             &[&grad_descent_fit],
-        //             &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
-        //             &log_scales,
-        //             &(String::from("figures/corner_plot_") + &file_name),
-        //             &bounds,
-        //             font.clone(),
-        //         )
-        //         .unwrap();
-        //     }
-        //     Some(_) => {
-        //         create_corner_plot(
-        //             &chain,
-        //             &[&grad_descent_fit],
-        //             &["M₂₀₀", "C₂₀₀", "ρ꜀"],
-        //             &[log_scales[0], log_scales[1], log_scales[3]],
-        //             &(String::from("figures/corner_plot_") + &file_name),
-        //             &[bounds[0], bounds[1], bounds[3]],
-        //             font.clone(),
-        //         )
-        //         .unwrap();
-        //     }
-        // }
+        match fixed_cross_section {
+            None => {
+                create_corner_plot(
+                    &chain,
+                    &[&grad_descent_fit],
+                    &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
+                    &log_scales,
+                    &(String::from("figures/corner_plot_") + &file_name),
+                    &bounds,
+                    font.clone(),
+                )
+                .unwrap();
+            }
+            Some(_) => {
+                create_corner_plot(
+                    &chain,
+                    &[&grad_descent_fit],
+                    &["M₂₀₀", "C₂₀₀", "ρ꜀"],
+                    &[log_scales[0], log_scales[1], log_scales[3]],
+                    &(String::from("figures/corner_plot_") + &file_name),
+                    &[bounds[0], bounds[1], bounds[3]],
+                    font.clone(),
+                )
+                .unwrap();
+            }
+        }
 
         params = match fixed_cross_section {
             None => {
@@ -309,7 +318,7 @@ fn main() {
 
     dbg!(params.clone());
 
-    evolution_profile(&params, &relhic_temperature, &data, font.clone());
+    // evolution_profile(&params, &relhic_temperature, &data, font.clone());
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -366,7 +375,7 @@ fn main() {
 }
 
 fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
-    let sidm_output = load_file(String::from("data/512_x_100k.mcmc")).unwrap();
+    let sidm_output = MCMCOutput::load("data/512_x_100k.mcmc").unwrap();
     let (sidm_rs, sidm_rhos) =
         m200_c200_to_rs_rhos(sidm_output.best_params[0], sidm_output.best_params[1]);
     let sidm_halo = Halo::NFW(sidm_rhos, sidm_rs);
@@ -379,14 +388,14 @@ fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     //     .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
     //     .map(|(p, _)| p)
     //     .unwrap();
-    let cdm_params = load_file(String::from("data/512_x_100k_sigma=0.mcmc"))
+    let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0.mcmc")
         .unwrap()
         .best_params;
     let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_params[0], cdm_params[1]);
     let cdm_halo = Halo::NFW(cdm_rhos, cdm_rs);
 
     let collapse_params = sidm_output
-        .chain()
+        .chain
         .into_iter()
         .zip(sidm_output.log_likelihoods)
         .filter(|(p, _)| p[2] > 0.95)

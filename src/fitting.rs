@@ -1,3 +1,4 @@
+use ensemble_mcmc::*;
 use plotters::style::IntoFont;
 use std::f64::consts::PI;
 
@@ -6,7 +7,7 @@ use crate::halo::{
     Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation, rs_rhos_to_m200_c200,
 };
 use crate::hydrostatics::{core_collapse_background_at_points, relhic_temperature};
-use crate::mcmc::*;
+// use crate::mcmc::*;
 use crate::{hydrostatics::core_collapse_background, plotting::plot_functions};
 
 #[derive(Clone)]
