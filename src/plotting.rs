@@ -1,12 +1,27 @@
+use corner_plot::{CornerPlotFormat, plot_histogram};
 use ensemble_mcmc::MCMCOutput;
+use plotters::coord::ranged1d::ValueFormatter;
 use plotters::prelude::*;
+use rayon::prelude::*;
 
 use crate::constants::*;
-use crate::corner_plot::*;
 use crate::halo::{McrSource, deviation, m200_c200_to_rs_rhos};
 // use crate::logging::load_file;
 use crate::utils::make_file_name;
 use std::f64::consts::PI;
+
+fn fmt_num(num: &f64) -> String {
+    if num.abs() <= 1e-100 {
+        // Probably true 0
+        return format!("0");
+    }
+
+    if num.abs() >= 1000.0 || num.abs() <= 0.1 {
+        format!("{:.1e}", num)
+    } else {
+        format!("{:.1}", num)
+    }
+}
 
 pub fn plot_functions(
     x_points: &Vec<f64>,
@@ -27,22 +42,30 @@ pub fn plot_functions(
 
     let mut y_min = f64::MAX;
     let mut y_max = f64::MIN;
+    let x_min;
+    let x_max;
 
     let data_spread = match data {
         Some(data_points) => Some(data_points.last().unwrap().0 - data_points[0].0),
         None => None,
     };
 
-    let x_range = match data {
-        Some(data_points) => 0.5 * data_points[0].0..2.0 * data_points.last().unwrap().0,
+    match data {
+        Some(data_points) => {
+            x_min = 0.5 * data_points[0].0;
+            x_max = 2.0 * data_points.last().unwrap().0;
+        }
         // Some(data_points) => {
-        //     (data_points[0].0 - 0.1 * data_spread.unwrap())
-        //         ..(data_points.last().unwrap().0 + 0.1 * data_spread.unwrap())
+        //     x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
+        //     x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
         // }
-        None => x_points[0]..x_points[x_points.len() - 1],
+        None => {
+            x_min = x_points[0];
+            x_max = *x_points.last().unwrap();
+        }
     };
 
-    // let x_range = x_points[0]..x_points[x_points.len() - 1];
+    let x_range = x_min..x_max;
 
     match data {
         Some(data_points) => {
@@ -97,20 +120,26 @@ pub fn plot_functions(
         }
     }
 
-    //println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
-
-    let y_range = (y_min + 1e-4)
-        * match y_min.signum() {
-            1.0 => 0.9,
-            -1.0 => 1.1,
-            _ => panic!("number has no sign, is probably NaN"),
-        }
-        ..y_max
+    // Buffer y_bounds
+    let (y_min, y_max) = (
+        (y_min + 1e-4)
+            * match y_min.signum() {
+                1.0 => 0.9,
+                -1.0 => 1.1,
+                _ => panic!("number has no sign, is probably NaN"),
+            },
+        y_max
             * match y_max.signum() {
-                1.0 => 3.0,
+                1.0 => 1.1,
                 -1.0 => 0.9,
                 _ => panic!("number has no sign, is probably NaN"),
-            };
+            },
+    );
+
+    println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
+    dbg!(y_max / 1e11);
+
+    let y_range = y_min..y_max;
 
     let log_scale = false;
 
@@ -133,6 +162,9 @@ pub fn plot_functions(
         .y_label_style(font.clone())
         .x_label_formatter(&fmt_num)
         .y_label_formatter(&fmt_num)
+        .x_labels(3)
+        .y_labels(5)
+        .axis_style(BLACK.stroke_width(1))
         .draw()?;
 
     let mut plot_profiles: Vec<Vec<(f64, f64)>> = Vec::with_capacity(y_points.len());
@@ -243,8 +275,155 @@ pub fn plot_functions(
         )?;
     }
 
+    let (x_ticks, y_ticks) = if log_scale {
+        (log_ticks(x_min, x_max, 0), log_ticks(y_min, y_max, -1))
+    } else {
+        (linear_ticks(x_min, x_max, 3), linear_ticks(y_min, y_max, 5))
+    };
+
+    draw_ticks_top_and_right(
+        &chart,
+        &x_ticks,
+        &y_ticks,
+        (x_min, x_max),
+        (y_min, y_max),
+        5,
+        BLACK.stroke_width(1),
+    )?;
+
     root.present()?;
     //println!("Plot saved as {}", filename);
+    Ok(())
+}
+
+fn linear_ticks(min: f64, max: f64, n: usize) -> Vec<f64> {
+    let step = (max - min) / (n as f64);
+    // Round step to a "nice" number (1, 2, 2.5, 5 × power of 10)
+    let magnitude = 10f64.powf(step.log10().floor());
+    let nice_step = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .iter()
+        .map(|&f| f * magnitude)
+        .find(|&s| s >= step)
+        .unwrap_or(magnitude);
+
+    // Start at the first multiple of nice_step >= min
+    let first = (min / nice_step).ceil() * nice_step;
+
+    std::iter::successors(Some(first), |&v| {
+        let next = v + nice_step;
+        if next <= max + 1e-10 * nice_step {
+            Some(next)
+        } else {
+            None
+        }
+    })
+    .collect()
+}
+
+fn log_ticks(min: f64, max: f64, level: i32) -> Vec<f64> {
+    let exp_min = min.log10().floor() as i32;
+    let exp_max = max.log10().ceil() as i32;
+
+    if level >= 0 {
+        // Coarser than one-per-decade: tick every 10^level decades
+        let stride = 10i32.pow(level as u32);
+        let first_exp = (exp_min as f64 / stride as f64).ceil() as i32 * stride;
+        std::iter::successors(Some(first_exp), |&e| Some(e + stride))
+            .take_while(|&e| e <= exp_max)
+            .map(|exp| 10f64.powi(exp))
+            .filter(|&v| v >= min * (1.0 - 1e-10) && v <= max * (1.0 + 1e-10))
+            .collect()
+    } else {
+        // Sub-decade: step = 10^(exp + level + 1) within each decade.
+        // Decade boundaries are generated as k=0 of each decade — no double-counting.
+        (exp_min..=exp_max)
+            .flat_map(move |exp| {
+                let decade_start = 10f64.powi(exp);
+                let step = 10f64.powi(exp + level + 1);
+                let next_decade = 10f64.powi(exp + 1);
+                (0..)
+                    .map(move |k| decade_start + k as f64 * step)
+                    .take_while(move |&v| v < next_decade * (1.0 - 1e-10))
+            })
+            .filter(|&v| v >= min * (1.0 - 1e-10) && v <= max * (1.0 + 1e-10))
+            .collect()
+    }
+}
+
+fn draw_ticks_top_and_right<
+    DB: DrawingBackend,
+    X: Ranged<ValueType = f64> + ValueFormatter<f64>,
+    Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
+>(
+    chart: &ChartContext<DB, Cartesian2d<X, Y>>,
+    x_ticks: &[f64],
+    y_ticks: &[f64],
+    (x_min, x_max): (f64, f64),
+    (y_min, y_max): (f64, f64),
+    tick_size: i32, // pixels; positive = inward
+    style: ShapeStyle,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let coord_spec = chart.as_coord_spec();
+
+    let (x_px_range, y_px_range) = (
+        coord_spec.get_x_axis_pixel_range(),
+        coord_spec.get_y_axis_pixel_range(),
+    );
+
+    let (x_offset, y_offset) = (
+        x_px_range.start.min(x_px_range.end),
+        y_px_range.start.min(y_px_range.end),
+    );
+
+    let area = chart.plotting_area().strip_coord_spec();
+    let (px_left, py_top) = chart.as_coord_spec().translate(&(x_min, y_max));
+    let (px_right, py_bottom) = chart.as_coord_spec().translate(&(x_max, y_min));
+    let (ly_top, ly_bottom) = (py_top - y_offset, py_bottom - y_offset);
+    let (lx_left, lx_right) = (px_left - x_offset, px_right - x_offset);
+
+    // Top edge: translate each x tick at y_max to get its pixel position
+    area.draw(&PathElement::new(
+        vec![(lx_left, ly_top), (lx_right, ly_top)],
+        style,
+    ))?;
+    for &x in x_ticks {
+        let (px, py_top) = chart.as_coord_spec().translate(&(x, y_max));
+        let (lx, ly) = (px - x_offset, py_top - y_offset);
+        area.draw(&PathElement::new(
+            vec![(lx, ly), (lx, ly + tick_size)],
+            style,
+        ))?;
+    }
+
+    // Right edge: translate each y tick at x_max to get its pixel position
+    area.draw(&PathElement::new(
+        vec![(lx_right, ly_top), (lx_right, ly_bottom)],
+        style,
+    ))?;
+    for &y in y_ticks {
+        let (px_right, py) = chart.as_coord_spec().translate(&(x_max, y));
+        let (lx, ly) = (px_right - x_offset, py - y_offset);
+        area.draw(&PathElement::new(
+            vec![(lx, ly), (lx - tick_size, ly)],
+            style,
+        ))?;
+    }
+
+    // Top-right corner tick dot (optional, closes the box)
+    let (px_right, py_top) = chart.as_coord_spec().translate(&(x_max, y_max));
+    let (lx, ly) = (px_right - x_offset, py_top - y_offset);
+    area.draw(&PathElement::new(
+        vec![(lx, ly), (lx - tick_size, ly)],
+        style,
+    ))?;
+    area.draw(&PathElement::new(
+        vec![(lx, ly), (lx, ly + tick_size)],
+        style,
+    ))?;
+
     Ok(())
 }
 
@@ -255,16 +434,13 @@ pub fn create_cross_section_deviation_relation_plot(
     cross_sections: &[f64],
     font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut data: Vec<(f64, f64)> = Vec::with_capacity(cross_sections.len());
-    let mut y_err: Vec<(f64, f64)> = Vec::with_capacity(cross_sections.len());
-
-    for cross_section in cross_sections {
+    let deviations: Vec<_> = cross_sections.to_vec().par_iter().map(|cross_section| {
+        dbg!(cross_section);
         let file_name = make_file_name(num_walkers, steps, prior, &Some(*cross_section));
 
         if let Ok(output) = MCMCOutput::load(&(String::from("data/") + &file_name + ".mcmc")) {
             let chain = output.chain;
 
-            let mut deviation_chain = Vec::with_capacity(chain.len());
             let mut mean_deviation = 0.0;
             let mut mean_square_deviation = 0.0;
             for params in &chain {
@@ -272,23 +448,30 @@ pub fn create_cross_section_deviation_relation_plot(
 
                 mean_deviation += deviation;
                 mean_square_deviation += deviation.powi(2);
-                deviation_chain.push(deviation);
             }
 
             mean_deviation /= chain.len() as f64;
             mean_square_deviation /= chain.len() as f64;
             let var_deviation = mean_square_deviation - mean_deviation.powi(2);
 
-            data.push((*cross_section, mean_deviation));
-            y_err.push((
-                mean_deviation - var_deviation.sqrt(),
-                mean_deviation + var_deviation.sqrt(),
-            ));
+            Some((*cross_section, mean_deviation, var_deviation))
         } else {
             println!(
                 "Unable to find data for cross_section = {cross_section}! Has this MCMC been run?"
-            )
+            );
+            None
         }
+    }).collect();
+
+    let mut data: Vec<(f64, f64)> = Vec::with_capacity(deviations.len());
+    let mut y_err: Vec<(f64, f64)> = Vec::with_capacity(deviations.len());
+    for deviation_data in deviations.into_iter().flatten() {
+        let (cross_section, mean_deviation, var_deviation): (f64, f64, f64) = deviation_data;
+        data.push((cross_section, mean_deviation));
+        y_err.push((
+            mean_deviation - var_deviation.sqrt(),
+            mean_deviation + var_deviation.sqrt(),
+        ));
     }
 
     plot_functions(
@@ -339,17 +522,26 @@ pub fn create_mcr_deviation_plot(
     let root = SVGBackend::new(svg_path, (1600, 1600)).into_drawing_area();
     root.fill(&WHITE)?;
 
+    let corner_plot_format = CornerPlotFormat {
+        font,
+        ..Default::default()
+    };
+
     plot_histogram(
-        &root.margin(5, 5 + X_LABEL_HEIGHT, 5 + Y_LABEL_WIDTH, 5),
+        &root.margin(
+            5,
+            5 + corner_plot_format.x_label_height,
+            5 + corner_plot_format.y_label_width,
+            5,
+        ),
         &deviation_chain,
         "deviation from cosmological median",
-        false,
         (0, 0),
         1,
         &bounds,
         &marked_values,
         None,
-        font,
+        &corner_plot_format,
     )?;
 
     root.present()?;
@@ -404,17 +596,26 @@ pub fn create_cross_section_plot(
     let root = SVGBackend::new(svg_path, (1600, 1600)).into_drawing_area();
     root.fill(&WHITE)?;
 
+    let corner_plot_format = CornerPlotFormat {
+        font,
+        ..Default::default()
+    };
+
     plot_histogram(
-        &root.margin(5, 5 + X_LABEL_HEIGHT, 5 + Y_LABEL_WIDTH, 5),
+        &root.margin(
+            5,
+            5 + corner_plot_format.x_label_height,
+            5 + corner_plot_format.y_label_width,
+            5,
+        ),
         &t_sigma_m_chain,
         "log(t sigma/m)",
-        false,
         (0, 0),
         1,
         &bounds,
         &marked_values,
         None, //Some(&[&prob_dens]),
-        font,
+        &corner_plot_format,
     )?;
 
     root.present()?;

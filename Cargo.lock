@@ -7,6 +7,7 @@ name = "Cloud9"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "corner-plot",
  "ensemble-mcmc",
  "plotters",
  "rand 0.9.2",
@@ -200,6 +201,14 @@ dependencies = [
  "core-graphics",
  "foreign-types",
  "libc",
+]
+
+[[package]]
+name = "corner-plot"
+version = "0.1.0"
+dependencies = [
+ "plotters",
+ "rayon",
 ]
 
 [[package]]

@@ -6,7 +6,9 @@ use crate::constants::*;
 use crate::halo::{
     Halo, McrSource, m200_c200_to_rs_rhos, mass_concentration_relation, rs_rhos_to_m200_c200,
 };
-use crate::hydrostatics::{core_collapse_background_at_points, relhic_temperature};
+use crate::hydrostatics::{
+    core_collapse_background_at_points, relhic_neutral_fraction, relhic_temperature,
+};
 // use crate::mcmc::*;
 use crate::{hydrostatics::core_collapse_background, plotting::plot_functions};
 
@@ -207,6 +209,7 @@ fn log_likelihood_full(params: &[f64], data: &Data, m200_input: bool, prior: Pri
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let model_points = core_collapse_background_at_points(
         relhic_temperature,
+        relhic_neutral_fraction,
         rho_s,
         r_s,
         params[2],
@@ -319,6 +322,7 @@ fn get_rms_err_of_fit(
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let fit = core_collapse_background(
         relhic_temperature,
+        relhic_neutral_fraction,
         params[0],
         params[1],
         params[2],

@@ -1,3 +1,4 @@
+use corner_plot::*;
 use ensemble_mcmc::*;
 use plotters::prelude::*;
 use std::f64::consts::PI;
@@ -6,17 +7,15 @@ use std::path::Path;
 
 use crate::constants::*;
 use crate::contour::get_3d_contour;
-use crate::corner_plot::create_corner_plot;
 use crate::fitting::{Cloud9MCMCCore, Data};
 use crate::halo::{
     Halo, deviation, init_diemer_joyce, m200_c200_to_rs_rhos, mass_concentration_relation,
     rs_rhos_to_m200_c200,
 };
 use crate::hydrostatics::{
-    abg_background, core_collapse_background, evolution_profile, relhic_temperature,
+    abg_background, core_collapse_background, evolution_profile, instability_profile,
+    relhic_neutral_fraction, relhic_temperature,
 };
-// use crate::logging::{load_file, save_output, save_output_json};
-// use crate::mcmc::{MCMCOutput, mcmc};
 use crate::plotting::{
     create_cross_section_deviation_relation_plot, create_cross_section_plot,
     create_mcr_deviation_plot, plot_functions,
@@ -26,12 +25,11 @@ use crate::utils::*;
 mod concentration_table;
 mod constants;
 mod contour;
-mod corner_plot;
+// mod corner_plot;
 mod fitting;
 mod halo;
 mod hydrostatics;
 mod logging;
-// mod mcmc;
 mod plotting;
 mod temperature;
 mod utils;
@@ -79,8 +77,9 @@ fn main() {
     let file_name = make_file_name(num_walkers, steps, &prior, &fixed_cross_section);
     let data_path = String::from("data/") + &file_name;
 
-    let bounds = [[1e8, 5e9], [0.0, 20.0], [0.0, 1.0], [8e4, 2e5]];
-    let log_scales = [true, false, false, true]; // [m200, c200, tau, rho_c]
+    let bounds = [[1e8, 5e9], [0.0, 13.0], [0.0, 1.0], [8e4, 2e5]];
+    //run with bounds = [[1e8, 5e9], [0.0, 10.0], [0.0, 1.0], [8e4, 2e5]];
+    let log_scales = vec![true, false, false, true]; // [m200, c200, tau, rho_c]
 
     //let font: FontDesc<'static> = ("sans-serif", 12).into_font(); //Paper
     let font: FontDesc<'static> = ("sans-serif", 25).into_font(); //Presentations
@@ -130,6 +129,7 @@ fn main() {
     // Active Code
 
     // cdm_vs_sidm_fit_plot(&data);
+    // svg_to_pdf("figures/cdm_vs_sidm").unwrap();
 
     // create_cross_section_deviation_relation_plot(
     //     num_walkers,
@@ -139,6 +139,7 @@ fn main() {
     //     font.clone(),
     // )
     // .unwrap();
+    // svg_to_pdf("figures/cross_section_vs_deviation").unwrap();
 
     let params: Vec<f64>;
     if mcmc_plots {
@@ -146,6 +147,7 @@ fn main() {
         if let Some(filename) = premade {
             output = MCMCOutput::load(&filename).unwrap();
         } else {
+            println!("Running MCMC!");
             let mcmc_core = Cloud9MCMCCore::init(data.clone(), prior, bounds, fixed_cross_section);
             output = mcmc(&mcmc_core, settings);
 
@@ -199,30 +201,64 @@ fn main() {
             (params, t_sigma_m, dev)
         };
 
-        let mut pruned_chain = Vec::new();
-        let mut marked_points = Vec::new();
+        // let mut pruned_chain = Vec::new();
+        // let mut marked_points = Vec::new();
 
-        for i in 0..chain.len() {
-            let params = chain[i].clone();
+        // for i in 0..chain.len() {
+        //     let params = chain[i].clone();
 
-            let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
-            let mut t_sigma_m = 150.0 * params[2]
-                / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
-                * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
-            t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+        //     let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+        //     let mut t_sigma_m = 150.0 * params[2]
+        //         / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
+        //         * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        //     t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
 
-            let sigma_m = t_sigma_m / 10.0;
+        //     let sigma_m = t_sigma_m / 10.0;
 
-            if sigma_m > 5e3 {
-                marked_points.push(params.clone());
-            }
+        //     if sigma_m > 5e3 {
+        //         marked_points.push(params.clone());
+        //     }
 
-            let dev = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
-            if dev > -3.0 {
-                pruned_chain.push(params)
-            }
-        }
-        dbg!(marked_points.len());
+        //     let dev = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
+        //     if dev > -3.0 {
+        //         pruned_chain.push(params)
+        //     }
+        // }
+        // dbg!(marked_points.len());
+
+        let cross_sec_chain: Vec<Vec<f64>> = chain
+            .iter()
+            .map(|params: &Vec<f64>| {
+                let deviation = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
+
+                let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+                let mut t_sigma_m = 150.0 * params[2]
+                    / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
+                    * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+                t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+                // dbg!(t_sigma_m / 10.0, deviation);
+                vec![t_sigma_m / 10.0, deviation]
+            })
+            .collect();
+
+        let mini_corner_plot_format = CornerPlotFormat {
+            font: ("sans-serif", 70).into_font(),
+            log_scales: Some(vec![true, false]),
+            x_label_height: 160,
+            y_label_width: 220,
+            hist_bins: 75,
+            contour_bins: 75,
+            ..Default::default()
+        };
+        // create_corner_plot(
+        //     &cross_sec_chain,
+        //     &[],
+        //     &["σ/m", "Deviation"],
+        //     &(String::from("figures/mini_corner_plot_") + &file_name),
+        //     &[[1e0, 5e4], [-7.0, 1.0]],
+        //     mini_corner_plot_format,
+        // )
+        // .unwrap();
 
         // use rand::seq::SliceRandom;
         // let mut rng = rand::rng();
@@ -259,32 +295,44 @@ fn main() {
         //     .unwrap();
         // }
 
-        match fixed_cross_section {
-            None => {
-                create_corner_plot(
-                    &chain,
-                    &[&grad_descent_fit],
-                    &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
-                    &log_scales,
-                    &(String::from("figures/corner_plot_") + &file_name),
-                    &bounds,
-                    font.clone(),
-                )
-                .unwrap();
-            }
-            Some(_) => {
-                create_corner_plot(
-                    &chain,
-                    &[&grad_descent_fit],
-                    &["M₂₀₀", "C₂₀₀", "ρ꜀"],
-                    &[log_scales[0], log_scales[1], log_scales[3]],
-                    &(String::from("figures/corner_plot_") + &file_name),
-                    &[bounds[0], bounds[1], bounds[3]],
-                    font.clone(),
-                )
-                .unwrap();
-            }
-        }
+        // match fixed_cross_section {
+        //     None => {
+        //         let corner_plot_format = CornerPlotFormat {
+        //             font: ("sans-serif", 35).into_font(),
+        //             log_scales: Some(log_scales),
+        //             hist_bins: 75,
+        //             contour_bins: 75,
+        //             x_label_height: 80,
+        //             y_label_width: 140,
+        //             ..Default::default()
+        //         };
+        //         create_corner_plot(
+        //             &chain,
+        //             &[],
+        //             &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
+        //             &(String::from("figures/corner_plot_") + &file_name),
+        //             &bounds,
+        //             corner_plot_format,
+        //         )
+        //         .unwrap();
+        //     }
+        //     Some(_) => {
+        //         let corner_plot_format = CornerPlotFormat {
+        //             font: font.clone(),
+        //             log_scales: Some(vec![log_scales[0], log_scales[1], log_scales[3]]),
+        //             ..Default::default()
+        //         };
+        //         create_corner_plot(
+        //             &chain,
+        //             &[],
+        //             &["M₂₀₀", "C₂₀₀", "ρ꜀"],
+        //             &(String::from("figures/corner_plot_") + &file_name),
+        //             &[bounds[0], bounds[1], bounds[3]],
+        //             corner_plot_format,
+        //         )
+        //         .unwrap();
+        //     }
+        // }
 
         params = match fixed_cross_section {
             None => {
@@ -313,12 +361,23 @@ fn main() {
     } else {
         // params = find_parameters_gradient_descent(&data, sidm_fit_params, None, false);
         // params = find_parameters_gradient_descent(&data, [2e7, 4.0, 0.5, 5e5], None, false);
-        params = sidm_fit_params;
+        // params = sidm_fit_params;
+        panic!("Make sure you mean to do this");
     }
 
     dbg!(params.clone());
 
     // evolution_profile(&params, &relhic_temperature, &data, font.clone());
+    // svg_to_pdf("figures/evolution").unwrap();
+
+    instability_profile(
+        &params,
+        (5e3, 1e7),
+        &relhic_temperature,
+        &relhic_neutral_fraction,
+        font.clone(),
+    );
+    // svg_to_pdf("figures/instability").unwrap();
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -335,11 +394,12 @@ fn main() {
 
     let fit = core_collapse_background(
         relhic_temperature,
+        relhic_neutral_fraction,
         params[0],
         params[1],
         params[2],
-        Some(params[3]),
-        (INNER_BOUND, halo.r_crit()),
+        Some(1e20), //Some(params[3]),
+        (1e-5 * INNER_BOUND, halo.r_crit()),
         true,
     );
 
@@ -376,21 +436,15 @@ fn main() {
 
 fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     let sidm_output = MCMCOutput::load("data/512_x_100k.mcmc").unwrap();
+    dbg!(&sidm_output.best_params);
     let (sidm_rs, sidm_rhos) =
         m200_c200_to_rs_rhos(sidm_output.best_params[0], sidm_output.best_params[1]);
     let sidm_halo = Halo::NFW(sidm_rhos, sidm_rs);
 
-    // let cdm_params = sidm_output
-    //     .chain()
-    //     .into_iter()
-    //     .zip(sidm_output.log_likelihoods.clone())
-    //     .filter(|(p, _)| p[2] < 0.05)
-    //     .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
-    //     .map(|(p, _)| p)
-    //     .unwrap();
     let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0.mcmc")
         .unwrap()
         .best_params;
+    dbg!(&cdm_params);
     let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_params[0], cdm_params[1]);
     let cdm_halo = Halo::NFW(cdm_rhos, cdm_rs);
 
@@ -402,16 +456,19 @@ fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
         .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
         .map(|(p, _)| p)
         .unwrap();
+    dbg!(&collapse_params);
     let (collapse_rs, collapse_rhos) = m200_c200_to_rs_rhos(collapse_params[0], collapse_params[1]);
     let collapse_halo = Halo::NFW(collapse_rhos, collapse_rs);
 
-    let r_max = cdm_halo
-        .r_crit()
-        .max(sidm_halo.r_crit())
-        .max(collapse_halo.r_crit()); //shared r_max so they share r_grid
+    let r_max = 1e2
+        * cdm_halo
+            .r_crit()
+            .max(sidm_halo.r_crit())
+            .max(collapse_halo.r_crit()); //shared r_max so they share r_grid
 
     let cdm_fit = core_collapse_background(
         relhic_temperature,
+        relhic_neutral_fraction,
         cdm_rhos,
         cdm_rs,
         0.0,
@@ -423,6 +480,7 @@ fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     let tau = sidm_output.best_params[2];
     let sidm_fit = core_collapse_background(
         relhic_temperature,
+        relhic_neutral_fraction,
         sidm_rhos,
         sidm_rs,
         tau,
@@ -434,6 +492,7 @@ fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     let collapse_tau = collapse_params[2];
     let collapse_fit = core_collapse_background(
         relhic_temperature,
+        relhic_neutral_fraction,
         collapse_rhos,
         collapse_rs,
         collapse_tau,
@@ -445,7 +504,7 @@ fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     plot_functions(
         &cdm_fit.0,
         &vec![cdm_fit.1, sidm_fit.1, collapse_fit.1],
-        "cdm_vs_sidm.svg",
+        "figures/cdm_vs_sidm.svg",
         "Best CDM and SIDM fits",
         "r (arcmin)",
         "H₁ Column Density (cm⁻²)",
