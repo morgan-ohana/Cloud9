@@ -1,6 +1,8 @@
 use corner_plot::*;
 use ensemble_mcmc::*;
 use plotters::prelude::*;
+use rayon::prelude::*;
+use std::env;
 use std::f64::consts::PI;
 use std::fs;
 use std::path::Path;
@@ -13,13 +15,10 @@ use crate::halo::{
     rs_rhos_to_m200_c200,
 };
 use crate::hydrostatics::{
-    abg_background, core_collapse_background, evolution_profile, instability_profile,
+    abg_background, core_collapse_background, evolution_profile, instability_profile, is_stable,
     relhic_neutral_fraction, relhic_temperature,
 };
-use crate::plotting::{
-    create_cross_section_deviation_relation_plot, create_cross_section_plot,
-    create_mcr_deviation_plot, plot_functions,
-};
+use crate::plotting::*;
 use crate::utils::*;
 
 mod concentration_table;
@@ -56,13 +55,19 @@ fn main() {
 
     // Control Switches
 
+    let args: Vec<usize> = env::args()
+        .skip(1)
+        .map(|a| a.parse::<usize>().expect("Expect a non-negative integer"))
+        .collect();
+    dbg!(&args);
+
     let mcmc_plots: bool = true;
     let prior = fitting::Prior::None;
     //let prior = fitting::Prior::MassConcentrationRelation(halo::McrSource::DiemerJoyce2019);
 
     let burn_in = 1000;
-    let num_walkers = 512;
-    let steps = 100000;
+    let num_walkers = args[0]; //512;
+    let steps = args[1]; //100000;
     let settings = MCMCSettings {
         burn_in,
         num_walkers,
@@ -72,14 +77,18 @@ fn main() {
 
     dbg!(settings);
 
-    let fixed_cross_section = None; //Some(75.0);
+    let fixed_cross_section = match args.len() == 2 {
+        true => None,
+        false => Some(args[2] as f64),
+    };
+    dbg!(fixed_cross_section);
 
     let file_name = make_file_name(num_walkers, steps, &prior, &fixed_cross_section);
     let data_path = String::from("data/") + &file_name;
 
-    let bounds = [[1e8, 5e9], [0.0, 13.0], [0.0, 1.0], [8e4, 2e5]];
+    let bounds = [[1.75e9, 5e9], [0.0, 9.0], [0.0, 1.0], [8e4, 1.6e5]];
     //run with bounds = [[1e8, 5e9], [0.0, 10.0], [0.0, 1.0], [8e4, 2e5]];
-    let log_scales = vec![true, false, false, true]; // [m200, c200, tau, rho_c]
+    let log_scales = vec![false, false, false, false]; // [m200, c200, tau, rho_c]
 
     //let font: FontDesc<'static> = ("sans-serif", 12).into_font(); //Paper
     let font: FontDesc<'static> = ("sans-serif", 25).into_font(); //Presentations
@@ -136,10 +145,12 @@ fn main() {
     //     steps,
     //     &prior,
     //     &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 150.0, 200.0],
-    //     font.clone(),
+    //     ("sans-serif", 30).into_font(),
     // )
     // .unwrap();
-    // svg_to_pdf("figures/cross_section_vs_deviation").unwrap();
+    // svg_to_pdf("figures/cross_section_vs_deviation_stable").unwrap();
+
+    instability_plot();
 
     let params: Vec<f64>;
     if mcmc_plots {
@@ -151,55 +162,178 @@ fn main() {
             let mcmc_core = Cloud9MCMCCore::init(data.clone(), prior, bounds, fixed_cross_section);
             output = mcmc(&mcmc_core, settings);
 
+            println!("Gelman-Rubin R-hat statistics: {:?}", output.gelman_rubin);
+
+            let converged = output.gelman_rubin.iter().all(|&r| r < 1.1);
+
+            if !converged {
+                println!("Warning: Chains may not have converged (R-hat > 1.1)");
+                println!("Consider running more steps or tuning step sizes.");
+            } else {
+                println!("Chains appear to have converged (R-hat < 1.1)");
+            }
+
             output.save(&(data_path.clone() + ".mcmc")).unwrap();
             output.save_as_json(&(data_path.clone() + ".json")).unwrap();
         }
 
-        println!("Gelman-Rubin R-hat statistics: {:?}", output.gelman_rubin);
+        // let chain = output.chain;
+        // let log_likelihoods = output.log_likelihoods;
 
-        let converged = output.gelman_rubin.iter().all(|&r| r < 1.1);
+        // let (stable, unstable): (Vec<_>, Vec<_>) = chain
+        //     .into_par_iter()
+        //     .zip(log_likelihoods.into_par_iter())
+        //     .partition(|(params, _)| {
+        //         let (rs, rhos) = m200_c200_to_rs_rhos(params[0], params[1]);
+        //         const AGE: f64 = 10.0;
+        //         let (tau, rho_c) = match fixed_cross_section {
+        //             None => (params[2], params[3]),
+        //             Some(cross_section) => (
+        //                 (0.75 * cross_section * AGE * rs * rhos * (4.0 * PI * GG * rhos).sqrt()
+        //                     / 150.0)
+        //                     * S_IN_GYR
+        //                     * G_IN_MSUN
+        //                     / (KM_IN_KPC * CM_IN_KPC.powi(2)),
+        //                 params[2],
+        //             ),
+        //         };
 
-        if !converged {
-            println!("Warning: Chains may not have converged (R-hat > 1.1)");
-            println!("Consider running more steps or tuning step sizes.");
-        } else {
-            println!("Chains appear to have converged (R-hat < 1.1)");
-        }
+        //         is_stable(
+        //             &[rhos, rs, tau, rho_c],
+        //             &relhic_temperature,
+        //             &relhic_neutral_fraction,
+        //         )
+        //     });
 
-        let chain = output.chain;
+        // let (stable_chain, stable_ll): (Vec<Vec<f64>>, Vec<f64>) = stable.into_iter().unzip();
+        // let (unstable_chain, unstable_ll): (Vec<Vec<f64>>, Vec<f64>) = unstable.into_iter().unzip();
 
-        check_chain_behavior(&chain);
+        // // Best params
+        // let stable_best_idx = stable_ll
+        //     .iter()
+        //     .enumerate()
+        //     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        //     .map(|(i, _)| i)
+        //     .unwrap();
+        // let unstable_best_idx = unstable_ll
+        //     .iter()
+        //     .enumerate()
+        //     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        //     .map(|(i, _)| i)
+        //     .unwrap();
+
+        // let stable_best_params = stable_chain[stable_best_idx].clone();
+        // let unstable_best_params = unstable_chain[unstable_best_idx].clone();
+
+        // let stable_output = MCMCOutput {
+        //     chain: stable_chain,
+        //     log_likelihoods: stable_ll,
+        //     best_params: stable_best_params,
+        //     gelman_rubin: output.gelman_rubin.clone(),
+        // };
+        // let unstable_output = MCMCOutput {
+        //     chain: unstable_chain,
+        //     log_likelihoods: unstable_ll,
+        //     best_params: unstable_best_params,
+        //     gelman_rubin: output.gelman_rubin.clone(),
+        // };
+
+        // stable_output
+        //     .save(&(data_path.clone() + "_stable.mcmc"))
+        //     .unwrap();
+        // unstable_output
+        //     .save(&(data_path.clone() + "_unstable.mcmc"))
+        //     .unwrap();
+
+        let stable_output = MCMCOutput::load(&(data_path.clone() + "_stable.mcmc")).unwrap();
+        let chain = stable_output.chain.clone();
+        // let unstable_output = MCMCOutput::load(&(data_path.clone() + "_unstable.mcmc")).unwrap();
+
+        // let num_stable = stable_output.chain.len();
+        // let num_unstable = unstable_output.chain.len();
+
+        // get_3d_contour(&stable_output.chain, &bounds, "cells_stable");
+        // get_3d_contour(&unstable_output.chain, &bounds, "cells_unstable");
+        // dbg!(num_stable);
+        // dbg!(num_unstable);
+        // dbg!(num_unstable as f64 / (num_stable + num_unstable) as f64);
+
+        // create_mcr_deviation_plot(
+        //     &stable_output.chain,
+        //     &(String::from("figures/deviation_plot_") + &file_name + "_stable"),
+        //     &[-8.0, 1.0],
+        //     &[],
+        //     font.clone(),
+        // )
+        // .unwrap();
+        // create_mcr_deviation_plot(
+        //     &unstable_output.chain,
+        //     &(String::from("figures/deviation_plot_") + &file_name + "_unstable"),
+        //     &[-8.0, 1.0],
+        //     &[],
+        //     font.clone(),
+        // )
+        // .unwrap();
+
+        // let corner_plot_format = CornerPlotFormat {
+        //     font: ("sans-serif", 35).into_font(),
+        //     log_scales: Some(log_scales),
+        //     hist_bins: 75,
+        //     contour_bins: 75,
+        //     x_label_height: 80,
+        //     y_label_width: 140,
+        //     ..Default::default()
+        // };
+        // create_corner_plot(
+        //     &stable_output.chain,
+        //     &[],
+        //     &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
+        //     &(String::from("figures/corner_plot_") + &file_name + "_stable"),
+        //     &bounds,
+        //     corner_plot_format.clone(),
+        // )
+        // .unwrap();
+        // create_corner_plot(
+        //     &unstable_output.chain,
+        //     &[],
+        //     &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
+        //     &(String::from("figures/corner_plot_") + &file_name + "_unstable"),
+        //     &bounds,
+        //     corner_plot_format,
+        // )
+        // .unwrap();
+
+        // check_chain_behavior(&chain);
 
         // get_3d_contour(&chain, &bounds);
 
-        let mcmc_sigma = {
-            let params = output.best_params.clone();
-            let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+        // let mcmc_sigma = {
+        //     let params = output.best_params.clone();
+        //     let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
 
-            let mut t_sigma_m = 150.0 * params[2]
-                / (0.75 * r_s * rho_s * (4.0 * PI * GG * rho_s).sqrt())
-                * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
-            t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+        //     let mut t_sigma_m = 150.0 * params[2]
+        //         / (0.75 * r_s * rho_s * (4.0 * PI * GG * rho_s).sqrt())
+        //         * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        //     t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
 
-            t_sigma_m
-        };
-        dbg!(mcmc_sigma);
+        //     t_sigma_m
+        // };
 
-        let (grad_descent_fit, grad_descent_sigma, grad_descent_deviation) = {
-            let mut params = sidm_fit_params.clone();
+        // let (grad_descent_fit, grad_descent_sigma, grad_descent_deviation) = {
+        //     let mut params = sidm_fit_params.clone();
 
-            let mut t_sigma_m = 150.0 * params[2]
-                / (0.75 * params[0] * params[1] * (4.0 * PI * GG * params[0]).sqrt())
-                * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
-            t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+        //     let mut t_sigma_m = 150.0 * params[2]
+        //         / (0.75 * params[0] * params[1] * (4.0 * PI * GG * params[0]).sqrt())
+        //         * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        //     t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
 
-            let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
-            params[0] = m200;
-            params[1] = c200;
+        //     let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
+        //     params[0] = m200;
+        //     params[1] = c200;
 
-            let dev = deviation(m200, c200, halo::McrSource::DiemerJoyce2019);
-            (params, t_sigma_m, dev)
-        };
+        //     let dev = deviation(m200, c200, halo::McrSource::DiemerJoyce2019);
+        //     (params, t_sigma_m, dev)
+        // };
 
         // let mut pruned_chain = Vec::new();
         // let mut marked_points = Vec::new();
@@ -226,35 +360,35 @@ fn main() {
         // }
         // dbg!(marked_points.len());
 
-        let cross_sec_chain: Vec<Vec<f64>> = chain
-            .iter()
-            .map(|params: &Vec<f64>| {
-                let deviation = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
+        // let cross_sec_chain: Vec<Vec<f64>> = chain
+        //     .iter()
+        //     .map(|params: &Vec<f64>| {
+        //         let deviation = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
 
-                let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
-                let mut t_sigma_m = 150.0 * params[2]
-                    / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
-                    * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
-                t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
-                // dbg!(t_sigma_m / 10.0, deviation);
-                vec![t_sigma_m / 10.0, deviation]
-            })
-            .collect();
+        //         let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+        //         let mut t_sigma_m = 150.0 * params[2]
+        //             / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
+        //             * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        //         t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+        //         // dbg!(t_sigma_m / 10.0, deviation);
+        //         vec![t_sigma_m / 10.0, deviation]
+        //     })
+        //     .collect();
 
-        let mini_corner_plot_format = CornerPlotFormat {
-            font: ("sans-serif", 70).into_font(),
-            log_scales: Some(vec![true, false]),
-            x_label_height: 160,
-            y_label_width: 220,
-            hist_bins: 75,
-            contour_bins: 75,
-            ..Default::default()
-        };
+        // let mini_corner_plot_format = CornerPlotFormat {
+        //     font: ("sans-serif", 70).into_font(),
+        //     log_scales: Some(vec![true, false]),
+        //     x_label_height: 160,
+        //     y_label_width: 220,
+        //     hist_bins: 75,
+        //     contour_bins: 75,
+        //     ..Default::default()
+        // };
         // create_corner_plot(
         //     &cross_sec_chain,
         //     &[],
         //     &["σ/m", "Deviation"],
-        //     &(String::from("figures/mini_corner_plot_") + &file_name),
+        //     &(String::from("figures/mini_corner_plot_") + &file_name + "_stable"),
         //     &[[1e0, 5e4], [-7.0, 1.0]],
         //     mini_corner_plot_format,
         // )
@@ -334,9 +468,19 @@ fn main() {
         //     }
         // }
 
+        // let m200_params = output.best_params.clone();
+        let m200_params_idx = stable_output
+            .log_likelihoods
+            .iter()
+            .enumerate()
+            .max_by(|(_idxa, lla), (_idxb, llb)| lla.partial_cmp(llb).unwrap())
+            .unwrap()
+            .0;
+        let m200_params = stable_output.chain[m200_params_idx].clone();
+
         params = match fixed_cross_section {
             None => {
-                let mut params = output.best_params.clone(); // m200_params.clone();
+                let mut params = m200_params;
                 let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
                 params[0] = rho_s;
                 params[1] = r_s;
@@ -344,8 +488,7 @@ fn main() {
             }
             Some(cross_section) => {
                 const AGE: f64 = 10.0;
-                let (r_s, rho_s) =
-                    m200_c200_to_rs_rhos(output.best_params[0], output.best_params[1]);
+                let (r_s, rho_s) = m200_c200_to_rs_rhos(m200_params[0], m200_params[1]);
 
                 // cm^2 g^-1 Gyr kpc Ms kpc^-3 (km^2 kpc Ms^-1 s^-2 Ms kpc^-3)^0.5 = cm^2 g^-1 Gyr Ms kpc^-2 km kpc^-1 s^-1 = (cm/kpc)^2 (km/kpc) (Gyr/s) (Ms/g)
                 let tau =
@@ -355,7 +498,7 @@ fn main() {
                         * G_IN_MSUN
                         / (KM_IN_KPC * CM_IN_KPC.powi(2));
 
-                vec![rho_s, r_s, tau, output.best_params[2]]
+                vec![rho_s, r_s, tau, m200_params[2]]
             }
         }
     } else {
@@ -367,17 +510,23 @@ fn main() {
 
     dbg!(params.clone());
 
-    // evolution_profile(&params, &relhic_temperature, &data, font.clone());
-    // svg_to_pdf("figures/evolution").unwrap();
-
-    instability_profile(
-        &params,
-        (5e3, 1e7),
-        &relhic_temperature,
-        &relhic_neutral_fraction,
-        font.clone(),
-    );
+    // instability_profile(
+    //     &params,
+    //     (1e4, 1e7),
+    //     &relhic_temperature,
+    //     &relhic_neutral_fraction,
+    //     font.clone(),
+    // );
     // svg_to_pdf("figures/instability").unwrap();
+
+    // evolution_profile(
+    //     &params,
+    //     &relhic_temperature,
+    //     &relhic_neutral_fraction,
+    //     &data,
+    //     font.clone(),
+    // );
+    // svg_to_pdf("figures/evolution").unwrap();
 
     let t = 10.0;
     let t_c = t / params[2];
@@ -432,93 +581,6 @@ fn main() {
         Some(&data.y_err),
     )
     .unwrap();
-}
-
-fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
-    let sidm_output = MCMCOutput::load("data/512_x_100k.mcmc").unwrap();
-    dbg!(&sidm_output.best_params);
-    let (sidm_rs, sidm_rhos) =
-        m200_c200_to_rs_rhos(sidm_output.best_params[0], sidm_output.best_params[1]);
-    let sidm_halo = Halo::NFW(sidm_rhos, sidm_rs);
-
-    let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0.mcmc")
-        .unwrap()
-        .best_params;
-    dbg!(&cdm_params);
-    let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_params[0], cdm_params[1]);
-    let cdm_halo = Halo::NFW(cdm_rhos, cdm_rs);
-
-    let collapse_params = sidm_output
-        .chain
-        .into_iter()
-        .zip(sidm_output.log_likelihoods)
-        .filter(|(p, _)| p[2] > 0.95)
-        .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
-        .map(|(p, _)| p)
-        .unwrap();
-    dbg!(&collapse_params);
-    let (collapse_rs, collapse_rhos) = m200_c200_to_rs_rhos(collapse_params[0], collapse_params[1]);
-    let collapse_halo = Halo::NFW(collapse_rhos, collapse_rs);
-
-    let r_max = 1e2
-        * cdm_halo
-            .r_crit()
-            .max(sidm_halo.r_crit())
-            .max(collapse_halo.r_crit()); //shared r_max so they share r_grid
-
-    let cdm_fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        cdm_rhos,
-        cdm_rs,
-        0.0,
-        Some(cdm_params[2]),
-        (INNER_BOUND, r_max),
-        false,
-    );
-
-    let tau = sidm_output.best_params[2];
-    let sidm_fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        sidm_rhos,
-        sidm_rs,
-        tau,
-        Some(sidm_output.best_params[3]),
-        (INNER_BOUND, r_max),
-        false,
-    );
-
-    let collapse_tau = collapse_params[2];
-    let collapse_fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        collapse_rhos,
-        collapse_rs,
-        collapse_tau,
-        Some(collapse_params[3]),
-        (INNER_BOUND, r_max),
-        false,
-    );
-
-    plot_functions(
-        &cdm_fit.0,
-        &vec![cdm_fit.1, sidm_fit.1, collapse_fit.1],
-        "figures/cdm_vs_sidm.svg",
-        "Best CDM and SIDM fits",
-        "r (arcmin)",
-        "H₁ Column Density (cm⁻²)",
-        vec![
-            Some(String::from("CDM")),
-            Some(format!("SIDM τ={tau:.2}")),
-            Some(format!("SIDM τ={collapse_tau:.2}")),
-        ],
-        ("sans-serif", 25).into_font(),
-        vec![false, true, true],
-        Some(&data.points),
-        Some(&data.y_err),
-    )
-    .unwrap()
 }
 
 fn check_chain_behavior(chain: &Vec<Vec<f64>>) {

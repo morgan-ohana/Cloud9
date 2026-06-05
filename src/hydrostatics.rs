@@ -4,9 +4,9 @@ use std::sync::OnceLock;
 use plotters::style::{FontDesc, IntoFont};
 use rayon::prelude::*;
 
-use crate::halo::Halo;
+use crate::halo::{Halo, rs_rhos_to_m200_c200};
 use crate::plotting::plot_functions;
-use crate::temperature::TnRelation;
+use crate::temperature::{self, TnRelation};
 use crate::{constants::*, fitting};
 
 const SPACIAL_GRID_NUM: usize = 2000;
@@ -657,7 +657,7 @@ fn get_profile_and_mass<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     r_points: &Vec<f64>,
     temperature: &T,
     neutral_fraction: &V,
-) -> (Vec<f64>, f64) {
+) -> (Vec<f64>, f64, Vec<f64>) {
     let dm_rho = parametic_core_collapse(params[1], params[0], params[2]);
     let dm_rho_points = get_rho_points(dm_rho, r_points);
     let external_field = get_force_points(dm_rho_points, r_points);
@@ -668,11 +668,7 @@ fn get_profile_and_mass<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
         neutral_fraction,
         params[3],
     );
-    let mut total_mass = get_spacial_integral(&full_rho_gas_points, r_points);
-    if full_rho_gas_points.last().unwrap() > &100.0 {
-        dbg!(full_rho_gas_points.last().unwrap());
-        total_mass = 0.0;
-    }
+    let total_mass = get_spacial_integral(&full_rho_gas_points, r_points);
 
     let number_density = {
         let mut num_density = Vec::with_capacity(neutral_rho_gas_points.len());
@@ -690,7 +686,7 @@ fn get_profile_and_mass<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
         col_dens
     };
 
-    (column_density, total_mass)
+    (column_density, total_mass, full_rho_gas_points)
 }
 
 pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
@@ -705,12 +701,13 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     let r_points = get_r_points(bounds);
 
     // get anchor fit
-    let (anchor_gas_rho_points, total_mass) =
+    let (anchor_gas_rho_points, total_mass, _) =
         get_profile_and_mass(anchor_params, &r_points, temperature, neutral_fraction);
+    assert!(is_stable(&anchor_params, temperature, neutral_fraction));
 
     // get evolution snapshots
 
-    let tau_snapshots = [0.0, 0.2, 0.4, 0.6, 0.7, 1.0];
+    let tau_snapshots = [0.2, 0.4];
     let mut gas_rho_points_vec = Vec::with_capacity(tau_snapshots.len() + 1);
     let mut legends = Vec::with_capacity(tau_snapshots.len() + 1);
     gas_rho_points_vec.push(anchor_gas_rho_points);
@@ -724,14 +721,14 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
         dbg!(tau);
         snapshot_params[2] = tau;
         // Note I don't reset snapshot rho_c between snapshots as snapshots are likely to be closer to each other than the anchor point
-        let (mut snapshot_gas_rho_points, mut snapshot_total_mass) =
+        let (mut snapshot_gas_rho_points, mut snapshot_total_mass, _) =
             get_profile_and_mass(&snapshot_params, &r_points, temperature, neutral_fraction);
 
         let mut percent_diff = (snapshot_total_mass - total_mass) / total_mass;
 
         let mut iter = 0.0;
         while percent_diff.abs() >= 1e-3 {
-            iter += 0.3;
+            iter += 0.1;
             if iter > 2000.0 {
                 panic!("failing to converge for tau={tau}")
             }
@@ -741,7 +738,7 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
                 snapshot_params[3].powf((1.0 - percent_diff).powf(1.0 / iter as f64));
             // snapshot_params[3] -= percent_diff * anchor_params[3];
 
-            (snapshot_gas_rho_points, snapshot_total_mass) =
+            (snapshot_gas_rho_points, snapshot_total_mass, _) =
                 get_profile_and_mass(&snapshot_params, &r_points, temperature, neutral_fraction);
 
             percent_diff = (snapshot_total_mass - total_mass) / total_mass
@@ -749,6 +746,7 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
 
         gas_rho_points_vec.push(snapshot_gas_rho_points);
         legends.push(Some(format!("τ = {}", tau)));
+        assert!(is_stable(&snapshot_params, temperature, neutral_fraction));
         snapshot_rho_cs.push(snapshot_params[3]);
     }
     dbg!(snapshot_rho_cs);
@@ -780,6 +778,7 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     )
     .unwrap();
 }
+
 pub fn instability_profile<
     T: Fn(f64, f64) -> f64 + std::marker::Sync,
     V: Fn(f64, f64) -> f64 + std::marker::Sync,
@@ -804,7 +803,7 @@ pub fn instability_profile<
     };
 
     let halo = Halo::NFW(anchor_params[0], anchor_params[1]);
-    let r_bounds = (1e-5 * INNER_BOUND, 1e2 * halo.r_crit());
+    let r_bounds = (1e-5 * INNER_BOUND, 1e3 * halo.r_crit());
     let r_points = get_r_points(r_bounds);
 
     // get evolution snapshots
@@ -830,7 +829,7 @@ pub fn instability_profile<
         .collect();
 
     // get anchor fit
-    let (_, total_mass) =
+    let (_, total_mass, _) =
         get_profile_and_mass(anchor_params, &r_points, temperature, neutral_fraction);
     ms_of_rhos.push(vec![total_mass; rho_axis.len()]);
     legends.push(Some(format!("Modern Cloud-9 Gas Mass:{:.2e}", total_mass)));
@@ -852,6 +851,170 @@ pub fn instability_profile<
         None,
     )
     .unwrap();
+
+    let sparse_rho_axis = {
+        const AXIS_GRID_NUM: usize = 10;
+        let mut rho_axis = Vec::with_capacity(AXIS_GRID_NUM);
+        for i in 0..AXIS_GRID_NUM {
+            rho_axis.push(
+                (bounds.0.ln()
+                    + (i as f64) * (bounds.1.ln() - bounds.0.ln()) / ((AXIS_GRID_NUM - 1) as f64))
+                    .exp(),
+            )
+        }
+        rho_axis
+    };
+
+    for tau in tau_snapshots {
+        let rho_funcs: Vec<Vec<f64>> = sparse_rho_axis
+            .iter()
+            .map(|rho_c| {
+                let mut params = anchor_params.clone();
+                params[2] = tau;
+                params[3] = *rho_c;
+                get_profile_and_mass(&params, &r_points, temperature, neutral_fraction).2
+            })
+            .collect();
+
+        plot_functions(
+            &r_points,
+            &rho_funcs,
+            &format!("figures/profiles_tau={tau}.svg"),
+            "Total Gas Density",
+            "r (kpc)",
+            "rho (M_s kpc^-3)",
+            sparse_rho_axis
+                .iter()
+                .map(|rho_c| Some(format!("ρ꜀={rho_c:.2e}")))
+                .collect(),
+            ("sans-serif", 35).into_font(),
+            vec![true; rho_funcs.len()],
+            None,
+            None,
+        )
+        .unwrap();
+    }
+}
+
+pub fn instability_showcase<
+    T: Fn(f64, f64) -> f64 + std::marker::Sync,
+    V: Fn(f64, f64) -> f64 + std::marker::Sync,
+>(
+    params: &Vec<Vec<f64>>,
+    bounds: (f64, f64),
+    temperature: &T,
+    neutral_fraction: &V,
+    font: FontDesc<'static>,
+) {
+    let rho_axis = {
+        const AXIS_GRID_NUM: usize = 100;
+        let mut rho_axis = Vec::with_capacity(AXIS_GRID_NUM);
+        for i in 0..AXIS_GRID_NUM {
+            rho_axis.push(
+                (bounds.0.ln()
+                    + (i as f64) * (bounds.1.ln() - bounds.0.ln()) / ((AXIS_GRID_NUM - 1) as f64))
+                    .exp(),
+            )
+        }
+        rho_axis
+    };
+
+    let r_min = 1e-5 * INNER_BOUND;
+    let mut r_max = INNER_BOUND;
+    for i in 0..params.len() {
+        let halo = Halo::NFW(params[i][0], params[i][1]);
+        r_max = r_max.max(1e3 * halo.r_crit());
+    }
+    let r_points = get_r_points((r_min, r_max));
+
+    let mut ms_of_rhos: Vec<Vec<f64>> = params
+        .iter()
+        .map(|params| {
+            rho_axis
+                .par_iter()
+                .map(|rho_c: &f64| {
+                    let snapshot_params = vec![params[0], params[1], params[2], *rho_c];
+
+                    get_profile_and_mass(&snapshot_params, &r_points, temperature, neutral_fraction)
+                        .1
+                })
+                .collect()
+        })
+        .collect();
+
+    let points: Vec<(f64, f64)> = params
+        .iter()
+        .map(|params| {
+            (
+                params[3],
+                get_profile_and_mass(&params, &r_points, temperature, neutral_fraction).1,
+            )
+        })
+        .collect();
+
+    let legends: Vec<Option<String>> = params
+        .iter()
+        .map(|params| {
+            let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
+            Some(format!(
+                "M₂₀₀ = {:.2e} C₂₀₀ = {:.2e} τ = {:.2}",
+                m200, c200, params[2]
+            ))
+        })
+        .rev()
+        .collect();
+
+    let dashed = vec![true; ms_of_rhos.len()];
+
+    plot_functions(
+        &rho_axis,
+        &ms_of_rhos,
+        "figures/instability_comp.svg",
+        "Insability in Some Cloud-9-like Halos",
+        "Gas Central Density",
+        "Total Gas Mas",
+        legends,
+        font,
+        dashed,
+        Some(&points),
+        None,
+    )
+    .unwrap();
+}
+
+pub fn is_stable<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+    params: &[f64],
+    temperature: &T,
+    neutral_fraction: &V,
+) -> bool {
+    let halo = Halo::NFW(params[0], params[1]);
+    let r_bounds = (1e-5 * INNER_BOUND, 1e3 * halo.r_crit());
+    let r_points = get_r_points(r_bounds);
+
+    let delta = params[3] * 0.02;
+
+    let dm_rho = parametic_core_collapse(params[1], params[0], params[2]);
+    let dm_rho_points = get_rho_points(dm_rho, &r_points);
+    let external_field = get_force_points(dm_rho_points, &r_points);
+
+    let (_neutral_rho_gas_points, lower_full_rho_gas_points) = get_hydrostatic_profile_outwards(
+        &r_points,
+        external_field.clone(),
+        temperature,
+        neutral_fraction,
+        params[3] - delta,
+    );
+    let lower_total_mass = get_spacial_integral(&lower_full_rho_gas_points, &r_points);
+    let (_neutral_rho_gas_points, upper_full_rho_gas_points) = get_hydrostatic_profile_outwards(
+        &r_points,
+        external_field.clone(),
+        temperature,
+        neutral_fraction,
+        params[3] + delta,
+    );
+    let upper_total_mass = get_spacial_integral(&upper_full_rho_gas_points, &r_points);
+
+    upper_total_mass > lower_total_mass
 }
 
 #[cfg(test)]

@@ -5,7 +5,10 @@ use plotters::prelude::*;
 use rayon::prelude::*;
 
 use crate::constants::*;
-use crate::halo::{McrSource, deviation, m200_c200_to_rs_rhos};
+use crate::fitting;
+use crate::halo::{Halo, McrSource, deviation, m200_c200_to_rs_rhos};
+use crate::hydrostatics::instability_showcase;
+use crate::hydrostatics::{core_collapse_background, relhic_neutral_fraction, relhic_temperature};
 // use crate::logging::load_file;
 use crate::utils::make_file_name;
 use std::f64::consts::PI;
@@ -51,14 +54,16 @@ pub fn plot_functions(
     };
 
     match data {
-        Some(data_points) => {
-            x_min = 0.5 * data_points[0].0;
-            x_max = 2.0 * data_points.last().unwrap().0;
-        }
         // Some(data_points) => {
-        //     x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
-        //     x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
+        //     x_min = 0.5 * data_points[0].0;
+        //     x_max = 2.0 * data_points.last().unwrap().0;
         // }
+        Some(data_points) => {
+            x_min = x_points[0];
+            x_max = *x_points.last().unwrap();
+            // x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
+            // x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
+        }
         None => {
             x_min = x_points[0];
             x_max = *x_points.last().unwrap();
@@ -83,9 +88,9 @@ pub fn plot_functions(
                     if y_err[i].1 > y_max {
                         y_max = y_err[i].1
                     }
-                    if y_err[i].0 < 1e-10 {
-                        continue;
-                    }
+                    // if y_err[i].0 < 1e-10 {
+                    //     continue;
+                    // }
                     if y_err[i].0 < y_min {
                         y_min = y_err[i].0
                     }
@@ -119,6 +124,7 @@ pub fn plot_functions(
             }
         }
     }
+    dbg!(y_min);
 
     // Buffer y_bounds
     let (y_min, y_max) = (
@@ -136,9 +142,9 @@ pub fn plot_functions(
             },
     );
 
-    println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
-    dbg!(y_max / 1e11);
+    // println!("y_min = {:.3}, y_max={:.3}", y_min, y_max);
 
+    dbg!(y_min);
     let y_range = y_min..y_max;
 
     let log_scale = false;
@@ -163,7 +169,7 @@ pub fn plot_functions(
         .x_label_formatter(&fmt_num)
         .y_label_formatter(&fmt_num)
         .x_labels(3)
-        .y_labels(5)
+        .y_labels(10)
         .axis_style(BLACK.stroke_width(1))
         .draw()?;
 
@@ -238,7 +244,11 @@ pub fn plot_functions(
 
     if let Some(data_points) = data {
         chart
-            .draw_series(data_points.iter().map(|point| Circle::new(*point, 5, &RED)))
+            .draw_series(
+                data_points
+                    .iter()
+                    .map(|point| Circle::new(*point, 5, &BLACK)),
+            )
             .unwrap();
     }
 
@@ -321,6 +331,8 @@ fn linear_ticks(min: f64, max: f64, n: usize) -> Vec<f64> {
 }
 
 fn log_ticks(min: f64, max: f64, level: i32) -> Vec<f64> {
+    assert!(min > 0.0);
+    assert!(max > 0.0);
     let exp_min = min.log10().floor() as i32;
     let exp_max = max.log10().ceil() as i32;
 
@@ -427,6 +439,113 @@ where
     Ok(())
 }
 
+pub fn instability_plot() {
+    let stable = MCMCOutput::load("data/512_x_100k_stable.mcmc").unwrap();
+    let unstable = MCMCOutput::load("data/512_x_100k_unstable.mcmc").unwrap();
+
+    let mut stable_params = stable.best_params;
+    let mut unstable_params = unstable.best_params;
+
+    (stable_params[1], stable_params[0]) = m200_c200_to_rs_rhos(stable_params[0], stable_params[1]);
+    (unstable_params[1], unstable_params[0]) =
+        m200_c200_to_rs_rhos(unstable_params[0], unstable_params[1]);
+
+    instability_showcase(
+        &vec![stable_params, unstable_params],
+        (3e3, 1e8),
+        &relhic_temperature,
+        &relhic_neutral_fraction,
+        ("sans-serif", 30).into_font(),
+    );
+}
+
+pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
+    let sidm_output = MCMCOutput::load("data/512_x_100k_stable.mcmc").unwrap();
+    dbg!(&sidm_output.best_params);
+    let (sidm_rs, sidm_rhos) =
+        m200_c200_to_rs_rhos(sidm_output.best_params[0], sidm_output.best_params[1]);
+    let sidm_halo = Halo::NFW(sidm_rhos, sidm_rs);
+
+    let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0_stable.mcmc")
+        .unwrap()
+        .best_params;
+    dbg!(&cdm_params);
+    let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_params[0], cdm_params[1]);
+    let cdm_halo = Halo::NFW(cdm_rhos, cdm_rs);
+
+    let collapse_params = sidm_output
+        .chain
+        .into_iter()
+        .zip(sidm_output.log_likelihoods)
+        .filter(|(p, _)| p[2] > 0.95)
+        .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
+        .map(|(p, _)| p)
+        .unwrap();
+    dbg!(&collapse_params);
+    let (collapse_rs, collapse_rhos) = m200_c200_to_rs_rhos(collapse_params[0], collapse_params[1]);
+    let collapse_halo = Halo::NFW(collapse_rhos, collapse_rs);
+
+    let r_max = 1e2
+        * cdm_halo
+            .r_crit()
+            .max(sidm_halo.r_crit())
+            .max(collapse_halo.r_crit()); //shared r_max so they share r_grid
+
+    let cdm_fit = core_collapse_background(
+        relhic_temperature,
+        relhic_neutral_fraction,
+        cdm_rhos,
+        cdm_rs,
+        0.0,
+        Some(cdm_params[2]),
+        (INNER_BOUND, r_max),
+        false,
+    );
+
+    let tau = sidm_output.best_params[2];
+    let sidm_fit = core_collapse_background(
+        relhic_temperature,
+        relhic_neutral_fraction,
+        sidm_rhos,
+        sidm_rs,
+        tau,
+        Some(sidm_output.best_params[3]),
+        (INNER_BOUND, r_max),
+        false,
+    );
+
+    let collapse_tau = collapse_params[2];
+    let collapse_fit = core_collapse_background(
+        relhic_temperature,
+        relhic_neutral_fraction,
+        collapse_rhos,
+        collapse_rs,
+        collapse_tau,
+        Some(collapse_params[3]),
+        (INNER_BOUND, r_max),
+        false,
+    );
+
+    plot_functions(
+        &cdm_fit.0,
+        &vec![cdm_fit.1, sidm_fit.1, collapse_fit.1],
+        "figures/cdm_vs_sidm_stable.svg",
+        "Best CDM and SIDM fits",
+        "r (arcmin)",
+        "H₁ Column Density (cm⁻²)",
+        vec![
+            Some(String::from("CDM")),
+            Some(format!("SIDM τ={tau:.2}")),
+            Some(format!("SIDM τ={collapse_tau:.2}")),
+        ],
+        ("sans-serif", 25).into_font(),
+        vec![false, true, true],
+        Some(&data.points),
+        Some(&data.y_err),
+    )
+    .unwrap()
+}
+
 pub fn create_cross_section_deviation_relation_plot(
     num_walkers: usize,
     steps: usize,
@@ -435,10 +554,10 @@ pub fn create_cross_section_deviation_relation_plot(
     font: FontDesc<'static>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let deviations: Vec<_> = cross_sections.to_vec().par_iter().map(|cross_section| {
-        dbg!(cross_section);
         let file_name = make_file_name(num_walkers, steps, prior, &Some(*cross_section));
 
-        if let Ok(output) = MCMCOutput::load(&(String::from("data/") + &file_name + ".mcmc")) {
+        if let Ok(output) = MCMCOutput::load(&(String::from("data/") + &file_name + "_stable.mcmc")) {
+            println!("File loaded for sigma/m={cross_section}");
             let chain = output.chain;
 
             let mut mean_deviation = 0.0;
@@ -477,7 +596,7 @@ pub fn create_cross_section_deviation_relation_plot(
     plot_functions(
         &Vec::new(),
         &Vec::new(),
-        &(String::from("figures/cross_section_vs_deviation.svg")),
+        &(String::from("figures/cross_section_vs_deviation_stable.svg")),
         "Deviation Dependence on Cross Section",
         "Cross Section (cm² / g)",
         "Deviation",

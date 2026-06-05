@@ -1,6 +1,6 @@
 use crate::logging::write_cells_to_csv;
 
-pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4]) {
+pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4], filename: &str) {
     let [[x_min, x_max], [y_min, y_max], [z_min, z_max], [_, _]] = bounds;
     // Simple 3D density estimation
     let grid_size = 100;
@@ -90,7 +90,7 @@ pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4]) {
         }
     }
 
-    write_cells_to_csv(&cells, "data/cells.csv").unwrap();
+    write_cells_to_csv(&cells, &format!("data/{filename}.csv")).unwrap();
 }
 
 fn gaussian_kernel(sigma: f64) -> Vec<f64> {

@@ -1,3 +1,23 @@
+Instability? | temp phys | ion phys | DM
+-----------------------------------------
+NO           | No        | No       | No
+YES (MID)    | Yes       | No       | No
+NO           | No        | Yes      | No
+YES (LARGE)  | No        | No       | Yes
+YES (MID)    | Yes       | Yes      | No
+YES (LARGE)  | No        | Yes      | Yes
+YES (MILD)   | Yes       | No       | Yes
+YES (MILD)   | Yes       | Yes      | Yes
+
+Conclusion: Ionization Doesn't matter!. Truncating table:
+
+Instability? | temp phys | DM
+-------------------------------
+NO           | No        | No
+YES (MID)    | Yes       | No
+YES (LARGE)  | No        | Yes
+YES (MILD)   | Yes       | Yes
+
 [src/main.rs:428:5] &sidm_output.best_params = [
     1772523083.4219313,
     5.914419938738744,
