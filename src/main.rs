@@ -6,6 +6,7 @@ use std::env;
 use std::f64::consts::PI;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::constants::*;
 use crate::contour::get_3d_contour;
@@ -137,7 +138,7 @@ fn main() {
 
     // Active Code
 
-    // cdm_vs_sidm_fit_plot(&data);
+    cdm_vs_sidm_fit_plot(&data);
     // svg_to_pdf("figures/cdm_vs_sidm").unwrap();
 
     // create_cross_section_deviation_relation_plot(
@@ -150,7 +151,7 @@ fn main() {
     // .unwrap();
     // svg_to_pdf("figures/cross_section_vs_deviation_stable").unwrap();
 
-    instability_plot();
+    // instability_plot();
 
     let params: Vec<f64>;
     if mcmc_plots {
@@ -275,24 +276,24 @@ fn main() {
         // )
         // .unwrap();
 
-        // let corner_plot_format = CornerPlotFormat {
-        //     font: ("sans-serif", 35).into_font(),
-        //     log_scales: Some(log_scales),
-        //     hist_bins: 75,
-        //     contour_bins: 75,
-        //     x_label_height: 80,
-        //     y_label_width: 140,
-        //     ..Default::default()
-        // };
-        // create_corner_plot(
-        //     &stable_output.chain,
-        //     &[],
-        //     &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
-        //     &(String::from("figures/corner_plot_") + &file_name + "_stable"),
-        //     &bounds,
-        //     corner_plot_format.clone(),
-        // )
-        // .unwrap();
+        let corner_plot_format = CornerPlotFormat {
+            font: ("sans-serif", 35).into_font(),
+            log_scales: Some(log_scales),
+            hist_bins: 75,
+            contour_bins: 75,
+            x_label_height: 80,
+            y_label_width: 140,
+            ..Default::default()
+        };
+        create_corner_plot(
+            &stable_output.chain,
+            &[],
+            &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
+            &(PathBuf::from(format!("figures/corner_plot_{file_name}_stable.svg"))),
+            &bounds,
+            corner_plot_format.clone(),
+        )
+        .unwrap();
         // create_corner_plot(
         //     &unstable_output.chain,
         //     &[],
@@ -528,59 +529,59 @@ fn main() {
     // );
     // svg_to_pdf("figures/evolution").unwrap();
 
-    let t = 10.0;
-    let t_c = t / params[2];
-    // [G rho] = km^2 kpc M_sun^-1 s^-2 * M_sun kpc^-3 = km^2 kpc^-2 s^-2
-    // sigma_m = gyr^-1 M_sun^-1 kpc^2 kpc s km^-1 = (s/gyr) kpc^2 (kpc/km) M_sun^-1
-    let mut sigma_m = 150.0
-        / (0.75 * t_c * params[0] * params[1] * (4.0 * PI * GG * params[0]).sqrt())
-        * (KM_IN_KPC / S_IN_GYR); // kpc^2 / M_sun
-    sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // cm^2 / g
+    // let t = 10.0;
+    // let t_c = t / params[2];
+    // // [G rho] = km^2 kpc M_sun^-1 s^-2 * M_sun kpc^-3 = km^2 kpc^-2 s^-2
+    // // sigma_m = gyr^-1 M_sun^-1 kpc^2 kpc s km^-1 = (s/gyr) kpc^2 (kpc/km) M_sun^-1
+    // let mut sigma_m = 150.0
+    //     / (0.75 * t_c * params[0] * params[1] * (4.0 * PI * GG * params[0]).sqrt())
+    //     * (KM_IN_KPC / S_IN_GYR); // kpc^2 / M_sun
+    // sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // cm^2 / g
 
-    println!("sigma_m = {sigma_m} \nt_c = {t_c}");
+    // println!("sigma_m = {sigma_m} \nt_c = {t_c}");
 
-    let halo = Halo::NFW(params[0], params[1]);
+    // let halo = Halo::NFW(params[0], params[1]);
 
-    let fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        params[0],
-        params[1],
-        params[2],
-        Some(1e20), //Some(params[3]),
-        (1e-5 * INNER_BOUND, halo.r_crit()),
-        true,
-    );
+    // let fit = core_collapse_background(
+    //     relhic_temperature,
+    //     relhic_neutral_fraction,
+    //     params[0],
+    //     params[1],
+    //     params[2],
+    //     Some(1e20), //Some(params[3]),
+    //     (1e-5 * INNER_BOUND, halo.r_crit()),
+    //     true,
+    // );
 
-    let halo = Halo::NFW(params[0], params[1]);
-    println!(
-        "r200 = {}, m200 = {:.4e}, c200 = {} \ndeviation = {}",
-        halo.r200().unwrap(),
-        halo.m200().unwrap(),
-        halo.c200().unwrap(),
-        halo.deviation().unwrap()
-    );
+    // let halo = Halo::NFW(params[0], params[1]);
+    // println!(
+    //     "r200 = {}, m200 = {:.4e}, c200 = {} \ndeviation = {}",
+    //     halo.r200().unwrap(),
+    //     halo.m200().unwrap(),
+    //     halo.c200().unwrap(),
+    //     halo.deviation().unwrap()
+    // );
 
-    let legend_text = format!(
-        "rho_s_0: {:.2e}  \nr_s_0: {:.2}  \ntau: {:.2}",
-        params[0], params[1], params[2]
-    );
-    println!("{}", &legend_text);
+    // let legend_text = format!(
+    //     "rho_s_0: {:.2e}  \nr_s_0: {:.2}  \ntau: {:.2}",
+    //     params[0], params[1], params[2]
+    // );
+    // println!("{}", &legend_text);
 
-    plot_functions(
-        &fit.0,
-        &vec![fit.1],
-        &(String::from("figures/fit_") + &file_name + ".svg"),
-        "Fit To Observed Profile",
-        "r (arcmin)",
-        "n_H (num / cm^2)",
-        vec![Some(legend_text)],
-        font,
-        vec![false],
-        Some(&data.points),
-        Some(&data.y_err),
-    )
-    .unwrap();
+    // plot_functions(
+    //     &fit.0,
+    //     &vec![fit.1],
+    //     &(String::from("figures/fit_") + &file_name + ".svg"),
+    //     "Fit To Observed Profile",
+    //     "r (arcmin)",
+    //     "n_H (num / cm^2)",
+    //     vec![Some(legend_text)],
+    //     font,
+    //     vec![false],
+    //     Some(&data.points),
+    //     Some(&data.y_err),
+    // )
+    // .unwrap();
 }
 
 fn check_chain_behavior(chain: &Vec<Vec<f64>>) {

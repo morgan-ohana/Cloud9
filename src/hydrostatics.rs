@@ -580,7 +580,7 @@ pub fn core_collapse_background<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     (angular_points, column_density)
 }
 
-fn parametic_core_collapse(r_s_0: f64, rho_s_0: f64, tau: f64) -> impl Fn(f64) -> f64 {
+pub fn parametic_core_collapse(r_s_0: f64, rho_s_0: f64, tau: f64) -> impl Fn(f64) -> f64 {
     // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
     let rho_s = rho_s_0
         * (2.033 + 0.7381 * tau + 7.264 * tau.powi(5) - 12.73 * tau.powi(7)

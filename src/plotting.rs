@@ -8,9 +8,11 @@ use crate::constants::*;
 use crate::fitting;
 use crate::halo::{Halo, McrSource, deviation, m200_c200_to_rs_rhos};
 use crate::hydrostatics::instability_showcase;
+use crate::hydrostatics::parametic_core_collapse;
 use crate::hydrostatics::{core_collapse_background, relhic_neutral_fraction, relhic_temperature};
 // use crate::logging::load_file;
 use crate::utils::make_file_name;
+use crate::utils::svg_to_pdf;
 use std::f64::consts::PI;
 
 fn fmt_num(num: &f64) -> String {
@@ -39,10 +41,33 @@ pub fn plot_functions(
     data: Option<&Vec<(f64, f64)>>,
     data_y_err: Option<&Vec<(f64, f64)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    //let root = BitMapBackend::new(filename, (1024, 768)).into_drawing_area();
     let root = SVGBackend::new(filename, (1024, 768)).into_drawing_area();
     root.fill(&WHITE)?;
 
+    draw_functions_on_area(
+        &root, x_points, y_points, title, xlabel, ylabel, legends, font, dashed, data, data_y_err,
+    )?;
+
+    root.present()?;
+    Ok(())
+}
+
+fn draw_functions_on_area<DB: DrawingBackend>(
+    area: &DrawingArea<DB, plotters::coord::Shift>,
+    x_points: &Vec<f64>,
+    y_points: &Vec<Vec<f64>>,
+    title: &str,
+    xlabel: &str,
+    ylabel: &str,
+    legends: Vec<Option<String>>,
+    font: FontDesc<'static>,
+    dashed: Vec<bool>,
+    data: Option<&Vec<(f64, f64)>>,
+    data_y_err: Option<&Vec<(f64, f64)>>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    DB::ErrorType: 'static,
+{
     let mut y_min = f64::MAX;
     let mut y_max = f64::MIN;
     let x_min;
@@ -54,16 +79,16 @@ pub fn plot_functions(
     };
 
     match data {
-        // Some(data_points) => {
-        //     x_min = 0.5 * data_points[0].0;
-        //     x_max = 2.0 * data_points.last().unwrap().0;
-        // }
         Some(data_points) => {
-            x_min = x_points[0];
-            x_max = *x_points.last().unwrap();
-            // x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
-            // x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
+            x_min = 0.5 * data_points[0].0;
+            x_max = 2.0 * data_points.last().unwrap().0;
         }
+        // Some(data_points) => {
+        //     // x_min = x_points[0];
+        //     // x_max = *x_points.last().unwrap();
+        //     // x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
+        //     // x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
+        // }
         None => {
             x_min = x_points[0];
             x_max = *x_points.last().unwrap();
@@ -88,9 +113,9 @@ pub fn plot_functions(
                     if y_err[i].1 > y_max {
                         y_max = y_err[i].1
                     }
-                    // if y_err[i].0 < 1e-10 {
-                    //     continue;
-                    // }
+                    if y_err[i].0 < 1e-10 {
+                        continue;
+                    }
                     if y_err[i].0 < y_min {
                         y_min = y_err[i].0
                     }
@@ -153,7 +178,7 @@ pub fn plot_functions(
     let y_range = y_range.log_scale();
     let log_scale = true;
 
-    let mut chart = ChartBuilder::on(&root)
+    let mut chart = ChartBuilder::on(area)
         .caption(title, ("sans-serif", 40))
         .margin(10)
         .x_label_area_size(60) //30)
@@ -169,7 +194,7 @@ pub fn plot_functions(
         .x_label_formatter(&fmt_num)
         .y_label_formatter(&fmt_num)
         .x_labels(3)
-        .y_labels(10)
+        .y_labels(5)
         .axis_style(BLACK.stroke_width(1))
         .draw()?;
 
@@ -244,11 +269,7 @@ pub fn plot_functions(
 
     if let Some(data_points) = data {
         chart
-            .draw_series(
-                data_points
-                    .iter()
-                    .map(|point| Circle::new(*point, 5, &BLACK)),
-            )
+            .draw_series(data_points.iter().map(|point| Circle::new(*point, 5, &RED)))
             .unwrap();
     }
 
@@ -286,7 +307,7 @@ pub fn plot_functions(
     }
 
     let (x_ticks, y_ticks) = if log_scale {
-        (log_ticks(x_min, x_max, 0), log_ticks(y_min, y_max, -1))
+        (log_ticks(x_min, x_max, 0), log_ticks(y_min, y_max, 0))
     } else {
         (linear_ticks(x_min, x_max, 3), linear_ticks(y_min, y_max, 5))
     };
@@ -301,7 +322,6 @@ pub fn plot_functions(
         BLACK.stroke_width(1),
     )?;
 
-    root.present()?;
     //println!("Plot saved as {}", filename);
     Ok(())
 }
@@ -462,15 +482,16 @@ pub fn instability_plot() {
 pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     let sidm_output = MCMCOutput::load("data/512_x_100k_stable.mcmc").unwrap();
     dbg!(&sidm_output.best_params);
-    let (sidm_rs, sidm_rhos) =
-        m200_c200_to_rs_rhos(sidm_output.best_params[0], sidm_output.best_params[1]);
+    let (sidm_m200, sidm_c200) = (sidm_output.best_params[0], sidm_output.best_params[1]);
+    let (sidm_rs, sidm_rhos) = m200_c200_to_rs_rhos(sidm_m200, sidm_c200);
     let sidm_halo = Halo::NFW(sidm_rhos, sidm_rs);
 
     let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0_stable.mcmc")
         .unwrap()
         .best_params;
     dbg!(&cdm_params);
-    let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_params[0], cdm_params[1]);
+    let (cdm_m200, cdm_c200) = (cdm_params[0], cdm_params[1]);
+    let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_m200, cdm_c200);
     let cdm_halo = Halo::NFW(cdm_rhos, cdm_rs);
 
     let collapse_params = sidm_output
@@ -482,7 +503,8 @@ pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
         .map(|(p, _)| p)
         .unwrap();
     dbg!(&collapse_params);
-    let (collapse_rs, collapse_rhos) = m200_c200_to_rs_rhos(collapse_params[0], collapse_params[1]);
+    let (collapse_m200, collapse_c200) = (collapse_params[0], collapse_params[1]);
+    let (collapse_rs, collapse_rhos) = m200_c200_to_rs_rhos(collapse_m200, collapse_c200);
     let collapse_halo = Halo::NFW(collapse_rhos, collapse_rs);
 
     let r_max = 1e2
@@ -526,10 +548,13 @@ pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
         false,
     );
 
-    plot_functions(
+    let root = SVGBackend::new("figures/cdm_vs_sidm_stable.svg", (1024, 768)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
+
+    draw_functions_on_area(
+        &root,
         &cdm_fit.0,
         &vec![cdm_fit.1, sidm_fit.1, collapse_fit.1],
-        "figures/cdm_vs_sidm_stable.svg",
         "Best CDM and SIDM fits",
         "r (arcmin)",
         "H₁ Column Density (cm⁻²)",
@@ -543,7 +568,121 @@ pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
         Some(&data.points),
         Some(&data.y_err),
     )
-    .unwrap()
+    .unwrap();
+
+    // Build Inset
+    println!("Building Inset!");
+
+    let r_dm_min = 1e-2 * cdm_rs.min(sidm_rs).min(collapse_rs);
+    let r_dm_max = 1e2 * cdm_rs.max(sidm_rs).max(collapse_rs);
+
+    let inset = root.clone().shrink((170, 290), (512, 400));
+    inset.fill(&WHITE).unwrap();
+
+    let rho_dm_max = cdm_rhos.min(sidm_rhos).min(collapse_rhos) * 1e3;
+    let rho_dm_min = cdm_rhos.max(sidm_rhos).max(collapse_rhos) * 1e-3;
+
+    let mut inset_chart = ChartBuilder::on(&inset)
+        .margin(5)
+        .x_label_area_size(60)
+        .y_label_area_size(120)
+        .build_cartesian_2d(
+            (r_dm_min..r_dm_max).log_scale(),
+            (rho_dm_min..rho_dm_max).log_scale(),
+        )
+        .unwrap();
+    // .set_secondary_coord(0..1, 0..1); // no-op placeholder if you don't need secondary axis
+
+    inset_chart
+        .configure_mesh()
+        .x_desc("r (kpc)")
+        .y_desc("Dark Matter Density (Mₛᵤₙ kpc⁻³)")
+        .x_label_style(("sans-serif", 25).into_font())
+        .y_label_style(("sans-serif", 25).into_font())
+        .x_labels(3)
+        .y_labels(3)
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .draw()
+        .unwrap();
+
+    // Build/Plot density profiles
+
+    const R_GRID_NUM: usize = 1000;
+    let r_range: Vec<f64> = (0..R_GRID_NUM)
+        .into_iter()
+        .map(|i: usize| -> f64 {
+            (r_dm_min.ln() + (i as f64 / (R_GRID_NUM - 1) as f64) * (r_dm_max.ln() - r_dm_min.ln()))
+                .exp()
+        })
+        .collect();
+
+    for (rs, rhos, m200, c200, tau, color) in [
+        (cdm_rs, cdm_rhos, cdm_m200, cdm_c200, 0.0, &BLACK),
+        (
+            sidm_rs,
+            sidm_rhos,
+            sidm_m200,
+            sidm_c200,
+            sidm_output.best_params[2],
+            &BLUE,
+        ),
+        (
+            collapse_rs,
+            collapse_rhos,
+            collapse_m200,
+            collapse_c200,
+            collapse_params[2],
+            &RED,
+        ),
+    ] {
+        let func = parametic_core_collapse(rs, rhos, tau);
+        let dm_rho_pts: Vec<(f64, f64)> = r_range.iter().map(|&r| (r, func(r))).collect();
+        inset_chart
+            .draw_series(LineSeries::new(dm_rho_pts, color))
+            .unwrap()
+            .label(format!("M₂₀₀ = {:.2e}, C₂₀₀= {:.2}", m200, c200))
+            .legend(move |(x, y)| {
+                PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    ShapeStyle {
+                        color: color.mix(1.0),
+                        filled: false,
+                        stroke_width: 2,
+                    },
+                )
+            });
+    }
+
+    // Configure and draw legend
+    inset_chart
+        .configure_series_labels()
+        .label_font(("sans-serif", 25).into_font())
+        .position(SeriesLabelPosition::UpperRight)
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()
+        .unwrap();
+
+    let (x_ticks, y_ticks) = (
+        log_ticks(r_dm_min, r_dm_max, 0),
+        log_ticks(rho_dm_min, rho_dm_max, 0),
+    );
+
+    draw_ticks_top_and_right(
+        &inset_chart,
+        &x_ticks,
+        &y_ticks,
+        (r_dm_min, r_dm_max),
+        (rho_dm_min, rho_dm_max),
+        5,
+        BLACK.stroke_width(1),
+    )
+    .unwrap();
+
+    root.present().unwrap();
+
+    svg_to_pdf("figures/cdm_vs_sidm_stable").unwrap();
 }
 
 pub fn create_cross_section_deviation_relation_plot(
