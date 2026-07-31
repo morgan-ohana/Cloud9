@@ -5,6 +5,8 @@ pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4], filename: &
     // Simple 3D density estimation
     let grid_size = 100;
 
+    let z_min: &f64 = &1e-6;
+
     let mut edges = vec![vec![vec![(0.0, 0.0, 0.0); grid_size + 1]; grid_size + 1]; grid_size + 1];
     for i in 0..=grid_size {
         for j in 0..=grid_size {
@@ -13,7 +15,9 @@ pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4], filename: &
                 let x_edge =
                     (x_min.ln() + (x_max.ln() - x_min.ln()) * i as f64 / grid_size as f64).exp();
                 let y_edge = y_min + (y_max - y_min) * j as f64 / grid_size as f64;
-                let z_edge = z_min + (z_max - z_min) * k as f64 / grid_size as f64;
+                // let z_edge = z_min + (z_max - z_min) * k as f64 / grid_size as f64;
+                let z_edge =
+                    (z_min.ln() + (z_max.ln() - z_min.ln()) * k as f64 / grid_size as f64).exp();
                 edges[i][j][k] = (x_edge, y_edge, z_edge);
             }
         }
@@ -31,7 +35,9 @@ pub fn get_3d_contour(chain: &Vec<Vec<f64>>, bounds: &[[f64; 2]; 4], filename: &
         let x_bin =
             ((x.ln() - x_min.ln()) / (x_max.ln() - x_min.ln()) * grid_size as f64).floor() as usize;
         let y_bin = ((y - y_min) / (y_max - y_min) * grid_size as f64).floor() as usize;
-        let z_bin = ((z - z_min) / (z_max - z_min) * grid_size as f64).floor() as usize;
+        // let z_bin = ((z - z_min) / (z_max - z_min) * grid_size as f64).floor() as usize;
+        let z_bin =
+            ((z.ln() - z_min.ln()) / (z_max.ln() - z_min.ln()) * grid_size as f64).floor() as usize;
 
         count += 1;
         density[x_bin][y_bin][z_bin] += 1.0;

@@ -11,10 +11,14 @@ use std::path::PathBuf;
 use crate::constants::*;
 use crate::contour::get_3d_contour;
 use crate::fitting::{Cloud9MCMCCore, Data};
+use crate::halo::t_cross_section;
 use crate::halo::{
     Halo, deviation, init_diemer_joyce, m200_c200_to_rs_rhos, mass_concentration_relation,
     rs_rhos_to_m200_c200,
 };
+use crate::hydrostatics::instability_showcase;
+use crate::hydrostatics::parametic_core_collapse;
+use crate::hydrostatics::relhic_temperature_and_slope;
 use crate::hydrostatics::{
     abg_background, core_collapse_background, evolution_profile, instability_profile, is_stable,
     relhic_neutral_fraction, relhic_temperature,
@@ -30,6 +34,7 @@ mod fitting;
 mod halo;
 mod hydrostatics;
 mod logging;
+mod plot_utils;
 mod plotting;
 mod temperature;
 mod utils;
@@ -87,30 +92,12 @@ fn main() {
     let file_name = make_file_name(num_walkers, steps, &prior, &fixed_cross_section);
     let data_path = String::from("data/") + &file_name;
 
-    let bounds = [[1.75e9, 5e9], [0.0, 9.0], [0.0, 1.0], [8e4, 1.6e5]];
-    //run with bounds = [[1e8, 5e9], [0.0, 10.0], [0.0, 1.0], [8e4, 2e5]];
+    // run with let bounds = [[1e1, 5e9], [0.0, 9.0], [0.0, 1.0], [8e4, 1.6e5]];
+    let bounds = [[1e9, 5e9], [0.0, 7.0], [0.0, 1.0], [8e4, 1.6e5]];
     let log_scales = vec![false, false, false, false]; // [m200, c200, tau, rho_c]
 
     //let font: FontDesc<'static> = ("sans-serif", 12).into_font(); //Paper
-    let font: FontDesc<'static> = ("sans-serif", 25).into_font(); //Presentations
-
-    let premade: Option<String> = Some(data_path.clone() + ".mcmc");
-
-    // Cached Results
-    // Found by grad descent:
-    let sidm_fit_params_old = vec![
-        6282772.676310997,
-        2.8897601910357062,
-        0.18438405302532834,
-        54574.17044567845,
-    ];
-
-    let sidm_fit_params = vec![
-        1699598.068854349,
-        4.188800887645102,
-        0.1721663180521211,
-        116490.93147055767,
-    ];
+    let font: FontDesc<'static> = ("Times New Roman", 25).into_font(); //Presentations
 
     // likelihood_slice_profile(
     //     &data,
@@ -121,25 +108,7 @@ fn main() {
     //     fitting::Prior::MassConcentrationRelation(halo::McrSource::DuttonMaccio2014),
     // );
 
-    let cdm_fit_params = vec![
-        7585724.648997071,
-        2.195234319751577,
-        0.0,
-        169116.20672504138,
-    ];
-
-    let mut mcmc_fit_params = [1.9e9, 9.3, 1.5, 5.5e4]; //[2.95124e9, 8.925, 0.161084, 5.17612e4];
-
-    {
-        let (r_s, rho_s) = m200_c200_to_rs_rhos(mcmc_fit_params[0], mcmc_fit_params[1]);
-        mcmc_fit_params[0] = rho_s;
-        mcmc_fit_params[1] = r_s;
-    }
-
     // Active Code
-
-    cdm_vs_sidm_fit_plot(&data);
-    // svg_to_pdf("figures/cdm_vs_sidm").unwrap();
 
     // create_cross_section_deviation_relation_plot(
     //     num_walkers,
@@ -151,13 +120,11 @@ fn main() {
     // .unwrap();
     // svg_to_pdf("figures/cross_section_vs_deviation_stable").unwrap();
 
-    // instability_plot();
-
     let params: Vec<f64>;
     if mcmc_plots {
         let output: MCMCOutput;
-        if let Some(filename) = premade {
-            output = MCMCOutput::load(&filename).unwrap();
+        if Path::new(&(data_path.clone() + ".mcmc")).exists() {
+            output = MCMCOutput::load(&(data_path.clone() + ".mcmc")).unwrap();
         } else {
             println!("Running MCMC!");
             let mcmc_core = Cloud9MCMCCore::init(data.clone(), prior, bounds, fixed_cross_section);
@@ -178,86 +145,94 @@ fn main() {
             output.save_as_json(&(data_path.clone() + ".json")).unwrap();
         }
 
-        // let chain = output.chain;
-        // let log_likelihoods = output.log_likelihoods;
+        if !Path::new(&(data_path.clone() + "_stable.mcmc")).exists()
+            || !Path::new(&(data_path.clone() + "_unstable.mcmc")).exists()
+        {
+            filter_stable(output.clone(), data_path.clone(), fixed_cross_section);
+        }
 
-        // let (stable, unstable): (Vec<_>, Vec<_>) = chain
-        //     .into_par_iter()
-        //     .zip(log_likelihoods.into_par_iter())
-        //     .partition(|(params, _)| {
-        //         let (rs, rhos) = m200_c200_to_rs_rhos(params[0], params[1]);
-        //         const AGE: f64 = 10.0;
-        //         let (tau, rho_c) = match fixed_cross_section {
-        //             None => (params[2], params[3]),
-        //             Some(cross_section) => (
-        //                 (0.75 * cross_section * AGE * rs * rhos * (4.0 * PI * GG * rhos).sqrt()
-        //                     / 150.0)
-        //                     * S_IN_GYR
-        //                     * G_IN_MSUN
-        //                     / (KM_IN_KPC * CM_IN_KPC.powi(2)),
-        //                 params[2],
-        //             ),
-        //         };
+        // instability_plot();
 
-        //         is_stable(
-        //             &[rhos, rs, tau, rho_c],
-        //             &relhic_temperature,
-        //             &relhic_neutral_fraction,
-        //         )
-        //     });
+        cdm_vs_sidm_fit_plot(&data);
 
-        // let (stable_chain, stable_ll): (Vec<Vec<f64>>, Vec<f64>) = stable.into_iter().unzip();
-        // let (unstable_chain, unstable_ll): (Vec<Vec<f64>>, Vec<f64>) = unstable.into_iter().unzip();
-
-        // // Best params
-        // let stable_best_idx = stable_ll
-        //     .iter()
-        //     .enumerate()
-        //     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        //     .map(|(i, _)| i)
-        //     .unwrap();
-        // let unstable_best_idx = unstable_ll
-        //     .iter()
-        //     .enumerate()
-        //     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        //     .map(|(i, _)| i)
-        //     .unwrap();
-
-        // let stable_best_params = stable_chain[stable_best_idx].clone();
-        // let unstable_best_params = unstable_chain[unstable_best_idx].clone();
-
-        // let stable_output = MCMCOutput {
-        //     chain: stable_chain,
-        //     log_likelihoods: stable_ll,
-        //     best_params: stable_best_params,
-        //     gelman_rubin: output.gelman_rubin.clone(),
-        // };
-        // let unstable_output = MCMCOutput {
-        //     chain: unstable_chain,
-        //     log_likelihoods: unstable_ll,
-        //     best_params: unstable_best_params,
-        //     gelman_rubin: output.gelman_rubin.clone(),
-        // };
-
-        // stable_output
-        //     .save(&(data_path.clone() + "_stable.mcmc"))
-        //     .unwrap();
-        // unstable_output
-        //     .save(&(data_path.clone() + "_unstable.mcmc"))
-        //     .unwrap();
-
-        let stable_output = MCMCOutput::load(&(data_path.clone() + "_stable.mcmc")).unwrap();
-        let chain = stable_output.chain.clone();
+        let stable_output = MCMCOutput::load(&(data_path.clone() + "_stable_bulk.mcmc")).unwrap();
+        // let stable_chain = stable_output.chain.clone();
         // let unstable_output = MCMCOutput::load(&(data_path.clone() + "_unstable.mcmc")).unwrap();
 
         // let num_stable = stable_output.chain.len();
         // let num_unstable = unstable_output.chain.len();
 
-        // get_3d_contour(&stable_output.chain, &bounds, "cells_stable");
-        // get_3d_contour(&unstable_output.chain, &bounds, "cells_unstable");
-        // dbg!(num_stable);
-        // dbg!(num_unstable);
-        // dbg!(num_unstable as f64 / (num_stable + num_unstable) as f64);
+        get_3d_contour(&stable_output.chain, &bounds, "cells_stable");
+        // // get_3d_contour(&unstable_output.chain, &bounds, "cells_unstable");
+
+        // filter_low_mass_island(stable_output.clone(), data_path.clone() + "_stable");
+
+        // let island_output = MCMCOutput::load(&(data_path.clone() + "_stable_island.mcmc")).unwrap();
+        // let num_island = island_output.chain.len();
+
+        // dbg!(num_stable - num_island);
+        // dbg!(num_unstable + num_island);
+        // dbg!((num_unstable + num_island) as f64 / (num_stable + num_unstable) as f64);
+
+        // let rhosrs_repack = island_output.chain[0..5]
+        //     .iter()
+        //     .map(|p: &Vec<f64>| {
+        //         let (rs, rhos) = m200_c200_to_rs_rhos(p[0], p[1]);
+        //         vec![rhos, rs, p[2], p[3]]
+        //     })
+        //     .collect();
+        // instability_showcase(
+        //     &rhosrs_repack,
+        //     (1e1, 1e8),
+        //     &relhic_temperature_and_slope,
+        //     &relhic_neutral_fraction,
+        //     ("sans-serif", 35).into_font(),
+        // );
+
+        // filter_cdm_island(stable_output.clone(), data_path.clone() + "_stable");
+
+        let cdmisland_output =
+            MCMCOutput::load(&(data_path.clone() + "_stable_cdmisland.mcmc")).unwrap();
+
+        let mut mean_log_dm_rho_c = 0.0;
+        let mut mean_square_log_dm_rho_c = 0.0;
+        let mut mean_dm_rho_c = 0.0;
+        let mut mean_square_dm_rho_c = 0.0;
+        for p in &cdmisland_output.chain {
+            let (rs, rhos) = m200_c200_to_rs_rhos(p[0], p[1]);
+            let dm_rho_c = parametic_core_collapse(rs, rhos, p[2])(0.0);
+
+            mean_log_dm_rho_c += dm_rho_c.ln();
+            mean_square_log_dm_rho_c += dm_rho_c.ln().powi(2);
+            mean_dm_rho_c += dm_rho_c;
+            mean_square_dm_rho_c += dm_rho_c.powi(2);
+        }
+        mean_log_dm_rho_c /= cdmisland_output.chain.len() as f64;
+        mean_square_log_dm_rho_c /= cdmisland_output.chain.len() as f64;
+        mean_dm_rho_c /= cdmisland_output.chain.len() as f64;
+        mean_square_dm_rho_c /= cdmisland_output.chain.len() as f64;
+
+        let log_dm_rho_c_standard_dev =
+            (mean_square_log_dm_rho_c - mean_log_dm_rho_c.powi(2)).sqrt();
+        let dm_rho_c_standard_dev = (mean_square_dm_rho_c - mean_dm_rho_c.powi(2)).sqrt();
+        dbg!(mean_log_dm_rho_c);
+        dbg!(log_dm_rho_c_standard_dev);
+        println!(
+            "cdm island DM rho_c has mean {:.2e} and  1-sigma region: ({:.2e}, {:.2e})",
+            mean_log_dm_rho_c.exp(),
+            (mean_log_dm_rho_c - log_dm_rho_c_standard_dev).exp(),
+            (mean_log_dm_rho_c + log_dm_rho_c_standard_dev).exp()
+        );
+        dbg!(mean_dm_rho_c);
+        dbg!(dm_rho_c_standard_dev);
+        println!(
+            "cdm island DM rho_c has mean {:.2e} and 1-sigma region: ({:.2e}, {:.2e})",
+            mean_dm_rho_c,
+            (mean_dm_rho_c - dm_rho_c_standard_dev),
+            (mean_dm_rho_c + dm_rho_c_standard_dev)
+        );
+
+        // dbg!(cdmisland_output.chain.len());
 
         // create_mcr_deviation_plot(
         //     &stable_output.chain,
@@ -276,33 +251,37 @@ fn main() {
         // )
         // .unwrap();
 
-        let corner_plot_format = CornerPlotFormat {
-            font: ("sans-serif", 35).into_font(),
-            log_scales: Some(log_scales),
-            hist_bins: 75,
-            contour_bins: 75,
-            x_label_height: 80,
-            y_label_width: 140,
-            ..Default::default()
-        };
-        create_corner_plot(
-            &stable_output.chain,
-            &[],
-            &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
-            &(PathBuf::from(format!("figures/corner_plot_{file_name}_stable.svg"))),
-            &bounds,
-            corner_plot_format.clone(),
-        )
-        .unwrap();
+        // let corner_plot_format = CornerPlotFormat {
+        //     font: ("sans-serif", 35).into_font(),
+        //     log_scales: Some(log_scales),
+        //     hist_bins: 75,
+        //     contour_bins: 75,
+        //     x_label_height: 80,
+        //     y_label_width: 140,
+        //     ..Default::default()
+        // };
+        // create_corner_plot(
+        //     &output.chain,
+        //     &[],
+        //     // &["M₂₀₀", "c₂₀₀", "ρ꜀"],
+        //     &["M₂₀₀", "c₂₀₀", "τ", "ρ꜀"],
+        //     &(PathBuf::from(format!("figures/corner_plot_{file_name}.svg"))),
+        //     &bounds,
+        //     // &[bounds[0], bounds[1], bounds[3]],
+        //     corner_plot_format.clone(),
+        // )
+        // .unwrap();
+        // svg_to_png(&format!("figures/corner_plot_{file_name}")).unwrap();
         // create_corner_plot(
         //     &unstable_output.chain,
         //     &[],
-        //     &["M₂₀₀", "C₂₀₀", "τ", "ρ꜀"],
-        //     &(String::from("figures/corner_plot_") + &file_name + "_unstable"),
+        //     &["M₂₀₀", "c₂₀₀", "τ", "ρ꜀"],
+        //     &(PathBuf::from(format!("figures/corner_plot_{file_name}_unstable.svg"))),
         //     &bounds,
         //     corner_plot_format,
         // )
         // .unwrap();
+        // svg_to_png(&format!("figures/corner_plot_{file_name}_unstable")).unwrap();
 
         // check_chain_behavior(&chain);
 
@@ -361,16 +340,12 @@ fn main() {
         // }
         // dbg!(marked_points.len());
 
-        // let cross_sec_chain: Vec<Vec<f64>> = chain
+        // let cross_sec_chain: Vec<Vec<f64>> = output
+        //     .chain
         //     .iter()
         //     .map(|params: &Vec<f64>| {
         //         let deviation = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
-
-        //         let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
-        //         let mut t_sigma_m = 150.0 * params[2]
-        //             / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
-        //             * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
-        //         t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+        //         let t_sigma_m = t_cross_section(params);
         //         // dbg!(t_sigma_m / 10.0, deviation);
         //         vec![t_sigma_m / 10.0, deviation]
         //     })
@@ -389,11 +364,12 @@ fn main() {
         //     &cross_sec_chain,
         //     &[],
         //     &["σ/m", "Deviation"],
-        //     &(String::from("figures/mini_corner_plot_") + &file_name + "_stable"),
+        //     &(PathBuf::from(format!("figures/mini_corner_plot_{file_name}.svg"))),
         //     &[[1e0, 5e4], [-7.0, 1.0]],
         //     mini_corner_plot_format,
         // )
         // .unwrap();
+        // svg_to_png(&format!("figures/mini_corner_plot_{file_name}")).unwrap();
 
         // use rand::seq::SliceRandom;
         // let mut rng = rand::rng();
@@ -582,6 +558,179 @@ fn main() {
     //     Some(&data.y_err),
     // )
     // .unwrap();
+}
+
+fn filter_stable(output: MCMCOutput, data_path: String, fixed_cross_section: Option<f64>) {
+    let chain = output.chain;
+    let log_likelihoods = output.log_likelihoods;
+
+    let (stable, unstable): (Vec<_>, Vec<_>) = chain
+        .into_par_iter()
+        .zip(log_likelihoods.into_par_iter())
+        .partition(|(params, _)| {
+            let (rs, rhos) = m200_c200_to_rs_rhos(params[0], params[1]);
+            const AGE: f64 = 10.0;
+            let (tau, rho_c) = match fixed_cross_section {
+                None => (params[2], params[3]),
+                Some(cross_section) => (
+                    (0.75 * cross_section * AGE * rs * rhos * (4.0 * PI * GG * rhos).sqrt()
+                        / 150.0)
+                        * S_IN_GYR
+                        * G_IN_MSUN
+                        / (KM_IN_KPC * CM_IN_KPC.powi(2)),
+                    params[2],
+                ),
+            };
+
+            is_stable(
+                &[rhos, rs, tau, rho_c],
+                &relhic_temperature_and_slope,
+                &relhic_neutral_fraction,
+            )
+        });
+
+    let (stable_chain, stable_ll): (Vec<Vec<f64>>, Vec<f64>) = stable.into_iter().unzip();
+    let (unstable_chain, unstable_ll): (Vec<Vec<f64>>, Vec<f64>) = unstable.into_iter().unzip();
+
+    // Best params
+    let stable_best_idx = stable_ll
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    let unstable_best_idx = unstable_ll
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    let stable_best_params = stable_chain[stable_best_idx].clone();
+    let unstable_best_params = unstable_chain[unstable_best_idx].clone();
+
+    let stable_output = MCMCOutput {
+        chain: stable_chain,
+        log_likelihoods: stable_ll,
+        best_params: stable_best_params,
+        gelman_rubin: output.gelman_rubin.clone(),
+    };
+    let unstable_output = MCMCOutput {
+        chain: unstable_chain,
+        log_likelihoods: unstable_ll,
+        best_params: unstable_best_params,
+        gelman_rubin: output.gelman_rubin.clone(),
+    };
+
+    stable_output
+        .save(&(data_path.clone() + "_stable.mcmc"))
+        .unwrap();
+    unstable_output
+        .save(&(data_path.clone() + "_unstable.mcmc"))
+        .unwrap();
+}
+
+fn filter_low_mass_island(output: MCMCOutput, data_path: String) {
+    let chain = output.chain;
+    let log_likelihoods = output.log_likelihoods;
+
+    let (island, bulk): (Vec<_>, Vec<_>) = chain
+        .into_par_iter()
+        .zip(log_likelihoods.into_par_iter())
+        .partition(|(params, _)| params[0] < 1e9);
+
+    let (island_chain, island_ll): (Vec<Vec<f64>>, Vec<f64>) = island.into_iter().unzip();
+    let (bulk_chain, bulk_ll): (Vec<Vec<f64>>, Vec<f64>) = bulk.into_iter().unzip();
+
+    // Best params
+    let island_best_idx = island_ll
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    let bulk_best_idx = bulk_ll
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    let island_best_params = island_chain[island_best_idx].clone();
+    let bulk_best_params = bulk_chain[bulk_best_idx].clone();
+
+    let island_output = MCMCOutput {
+        chain: island_chain,
+        log_likelihoods: island_ll,
+        best_params: island_best_params,
+        gelman_rubin: output.gelman_rubin.clone(),
+    };
+    let bulk_output = MCMCOutput {
+        chain: bulk_chain,
+        log_likelihoods: bulk_ll,
+        best_params: bulk_best_params,
+        gelman_rubin: output.gelman_rubin.clone(),
+    };
+
+    island_output
+        .save(&(data_path.clone() + "_island.mcmc"))
+        .unwrap();
+    bulk_output
+        .save(&(data_path.clone() + "_bulk.mcmc"))
+        .unwrap();
+}
+
+fn filter_cdm_island(output: MCMCOutput, data_path: String) {
+    let chain = output.chain;
+    let log_likelihoods = output.log_likelihoods;
+
+    let (island, bulk): (Vec<_>, Vec<_>) = chain
+        .into_par_iter()
+        .zip(log_likelihoods.into_par_iter())
+        .partition(|(params, _)| {
+            t_cross_section(params) / 10.0 < 7.0
+                && deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019) < -5.0
+        });
+
+    let (island_chain, island_ll): (Vec<Vec<f64>>, Vec<f64>) = island.into_iter().unzip();
+    let (bulk_chain, bulk_ll): (Vec<Vec<f64>>, Vec<f64>) = bulk.into_iter().unzip();
+
+    // Best params
+    let island_best_idx = island_ll
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    let bulk_best_idx = bulk_ll
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    let island_best_params = island_chain[island_best_idx].clone();
+    let bulk_best_params = bulk_chain[bulk_best_idx].clone();
+
+    let island_output = MCMCOutput {
+        chain: island_chain,
+        log_likelihoods: island_ll,
+        best_params: island_best_params,
+        gelman_rubin: output.gelman_rubin.clone(),
+    };
+    let bulk_output = MCMCOutput {
+        chain: bulk_chain,
+        log_likelihoods: bulk_ll,
+        best_params: bulk_best_params,
+        gelman_rubin: output.gelman_rubin.clone(),
+    };
+
+    island_output
+        .save(&(data_path.clone() + "_cdmisland.mcmc"))
+        .unwrap();
+    bulk_output
+        .save(&(data_path.clone() + "_sidmbulk.mcmc"))
+        .unwrap();
 }
 
 fn check_chain_behavior(chain: &Vec<Vec<f64>>) {

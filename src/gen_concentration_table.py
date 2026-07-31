@@ -21,8 +21,8 @@ COSMOLOGY = "planck18"
 cosmology.setCosmology(COSMOLOGY)
 
 # ── Sampling ─────────────────────────────────────────────────────────────────
-N_POINTS   = 1000
-LOG_M_MIN  = 6.0    # log10(M / [Msun/h])
+N_POINTS   = 10000
+LOG_M_MIN  = 1.0    # log10(M / [Msun/h])
 LOG_M_MAX  = 15.0
 REDSHIFT   = 0.0
 MODEL      = "diemer19"

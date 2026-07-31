@@ -137,6 +137,15 @@ pub fn rs_rhos_to_m200_c200(r_s: f64, rho_s: f64) -> (f64, f64) {
     (m200, c200)
 }
 
+pub fn t_cross_section(params: &[f64]) -> f64 {
+    let (r_s, rho_s) = m200_c200_to_rs_rhos(params[0], params[1]);
+    let mut t_sigma_m = 150.0 * params[2] / (0.75 * rho_s * r_s * (4.0 * PI * GG * rho_s).sqrt())
+        * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+    t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+
+    t_sigma_m
+}
+
 #[derive(Clone, Debug)]
 pub enum McrSource {
     DuttonMaccio2014,

@@ -12,6 +12,7 @@ pub const DIEMER_JOYCE_SCATTER: f64 = 0.16; // intrinsic scatter in log10(c), Di
 pub const GG: f64 = 4.301e-6; // Newton constant km^2 kpc / Msun s^2
 pub const M_PROTON: f64 = 8.41e-58; // Proton mass in Msun
 pub const MP_OVER_KB: f64 = 1.15349467e35; // Proton mass over boltzmann constant s^2 K / kpc^2
+pub const KB_OVER_MP: f64 = 8.66930748e-36; // Boltzmann constant over proton mass kpc^2 / s^2 K
 pub const HH: f64 = 0.671; // normalization factor for hubble constant
 pub const HUBBLE: f64 = 0.0671; // hubble const km / s kpc
 pub const RHOCRIT: f64 = 3.0 * (HUBBLE * HUBBLE) / (8.0 * PI * GG); // My calculation (124.927 M_sun / kpc^3)

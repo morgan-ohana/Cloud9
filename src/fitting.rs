@@ -8,6 +8,7 @@ use crate::halo::{
 };
 use crate::hydrostatics::{
     core_collapse_background_at_points, relhic_neutral_fraction, relhic_temperature,
+    relhic_temperature_and_slope,
 };
 // use crate::mcmc::*;
 use crate::{hydrostatics::core_collapse_background, plotting::plot_functions};
@@ -208,7 +209,7 @@ fn log_likelihood_full(params: &[f64], data: &Data, m200_input: bool, prior: Pri
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let model_points = core_collapse_background_at_points(
-        relhic_temperature,
+        relhic_temperature_and_slope,
         relhic_neutral_fraction,
         rho_s,
         r_s,
@@ -321,7 +322,7 @@ fn get_rms_err_of_fit(
 
     // must be passed as rho_s_0, r_s_0, tau, rho_c
     let fit = core_collapse_background(
-        relhic_temperature,
+        relhic_temperature_and_slope,
         relhic_neutral_fraction,
         params[0],
         params[1],

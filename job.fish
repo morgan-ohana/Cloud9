@@ -1,3 +1,4 @@
+cargo run --release 512 100000 0
 cargo run --release 512 100000 10
 cargo run --release 512 100000 20
 cargo run --release 512 100000 30

@@ -1,11 +1,15 @@
 use std::f64::consts::PI;
 use std::sync::OnceLock;
 
+use plotters::prelude::*;
 use plotters::style::{FontDesc, IntoFont};
 use rayon::prelude::*;
 
-use crate::halo::{Halo, rs_rhos_to_m200_c200};
-use crate::plotting::plot_functions;
+use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
+use crate::plot_utils::frame::{draw_ticks_top_and_right, log_ticks};
+use crate::plotting::{draw_functions_on_area, fmt_num, plot_functions};
+
+use crate::plot_utils::build::svg_to_pdf;
 use crate::temperature::{self, TnRelation};
 use crate::{constants::*, fitting};
 
@@ -164,7 +168,7 @@ fn get_column_density(rho_points: Vec<f64>, r_points: &Vec<f64>) -> Vec<f64> {
     sigma
 }
 
-fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+fn get_hydrostatic_profile_outwards<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     r_points: &Vec<f64>,
     external_field: Vec<f64>,
     temperature: T,
@@ -174,7 +178,7 @@ fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f
     let mut neutral_rho_points = Vec::with_capacity(r_points.len());
     let mut rho_points = Vec::with_capacity(r_points.len());
 
-    let central_temp = temperature(0.0, rho_center);
+    let (central_temp, _) = temperature(rho_center);
     let neutral_rho_center = neutral_fraction(rho_center, central_temp) * rho_center;
 
     rho_points.push(rho_center);
@@ -192,12 +196,16 @@ fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f
 
     let mut enclosed_mass = 0.0;
 
+    let mu_func = |rho: f64, t: f64| -> f64 { 1.0 / (2.0 - neutral_fraction(rho, t)) };
+
     for i in 2..r_points.len() {
         // current pressure & temp
-        let temp = temperature(r_points[i - 1], rho_points[i - 1]);
+        let (temp, dln_t_dl_rho) = temperature(rho_points[i - 1]);
         let neutral_frac = neutral_fraction(rho_points[i - 1], temp);
-        let molecular_weight = 1.0 / (2.0 - neutral_frac);
-        let mut press = rho_points[i - 1] * temp / (MP_OVER_KB * molecular_weight);
+        let mu = 1.0 / (2.0 - neutral_frac);
+        let (dln_mu_dln_rho, dln_mu_dl_t) = mu_log_derivatives(rho_points[i - 1], temp, mu_func);
+
+        let rho_over_press = MP_OVER_KB * mu / temp;
 
         // Calculate dP
         let dr = r_points[i] - r_points[i - 1];
@@ -212,23 +220,22 @@ fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f
 
         enclosed_mass += vol * (rho_points[i - 1] + rho_points[i - 2]) / 2.0;
 
+        // self grav
+
         let mut f_grav = -GG * enclosed_mass / r_points[i].powi(2); // [km^2 kpc / M_sun s^2] * Msun / kpc^2 = [km^2 / s^2] / kpc
 
         f_grav /= KM_IN_KPC * KM_IN_KPC; // kpc / s^2
 
+        // dP
         let dpress = rho_points[i - 1] * (external_piece + f_grav * dr);
 
-        press = (press + dpress).max(0.0);
+        // correction due to T and mu gradients
+        let denom = 1.0 - dln_mu_dln_rho + dln_t_dl_rho * (1.0 - dln_mu_dl_t);
 
-        let rho_new = if press <= 0.0 {
-            0.0
-        } else {
-            assert!(temp > 0.0);
-            press * MP_OVER_KB * molecular_weight / temp
-        };
+        let drho = rho_over_press * dpress / denom;
 
-        rho_points.push(rho_new);
-        let temp = temperature(r_points[i], rho_points[i]);
+        rho_points.push((rho_points[i - 1] + drho).max(0.0));
+        let (temp, _) = temperature(rho_points[i]);
         let neutral_frac = neutral_fraction(rho_points[i], temp);
         neutral_rho_points.push(rho_points[i] * neutral_frac);
     }
@@ -236,7 +243,7 @@ fn get_hydrostatic_profile_outwards<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f
     (neutral_rho_points, rho_points)
 }
 
-fn get_hydrostatic_profile_inwards<T: Fn(f64, f64) -> f64>(
+fn get_hydrostatic_profile_inwards<T: Fn(f64) -> (f64, f64)>(
     r_points: &Vec<f64>,
     dm_rho_points: Vec<f64>,
     temperature: T,
@@ -271,8 +278,7 @@ fn get_hydrostatic_profile_inwards<T: Fn(f64, f64) -> f64>(
         dbg!(i);
         dbg!(r_points[i]);
         let force_prefactor = {
-            let mut prefactor =
-                4.0 * PI * GG * MP_OVER_KB / temperature(r_points[i], gas_rho_points[i + 1]);
+            let mut prefactor = 4.0 * PI * GG * MP_OVER_KB / temperature(gas_rho_points[i + 1]).0;
             prefactor /= KM_IN_KPC * KM_IN_KPC; // kpc / M_sun
             prefactor
         };
@@ -310,7 +316,7 @@ fn get_hydrostatic_profile_inwards<T: Fn(f64, f64) -> f64>(
     gas_rho_points
 }
 
-pub fn abg_background<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+pub fn abg_background<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     temperature: T,
     neutral_fraction: V,
     alpha: f64,
@@ -401,7 +407,7 @@ pub fn abg_background<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     .unwrap();
 }
 
-pub fn core_collapse_background_at_points<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+pub fn core_collapse_background_at_points<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     temperature: T,
     neutral_fraction: V,
     rho_s_0: f64,
@@ -460,7 +466,7 @@ pub fn core_collapse_background_at_points<T: Fn(f64, f64) -> f64, V: Fn(f64, f64
     column_density
 }
 
-pub fn core_collapse_background<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+pub fn core_collapse_background<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     temperature: T,
     neutral_fraction: V,
     rho_s_0: f64,
@@ -580,6 +586,36 @@ pub fn core_collapse_background<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     (angular_points, column_density)
 }
 
+pub fn core_collapse_background_3d_output<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
+    temperature: T,
+    neutral_fraction: V,
+    rho_s_0: f64,
+    r_s_0: f64,
+    collapse_progress: f64,
+    rho_c: Option<f64>,
+    r_points: &Vec<f64>,
+) -> (Vec<f64>, Vec<f64>) {
+    let rho = parametic_core_collapse(r_s_0, rho_s_0, collapse_progress);
+
+    let dark_matter_rho_points = get_rho_points(rho, &r_points);
+
+    match rho_c {
+        None => {
+            panic!("Inwards integration was abandoned and never fully implemented")
+        }
+        Some(rho_c) => {
+            let external_field = get_force_points(dark_matter_rho_points, &r_points);
+            return get_hydrostatic_profile_outwards(
+                &r_points,
+                external_field,
+                &temperature,
+                &neutral_fraction,
+                rho_c,
+            );
+        }
+    };
+}
+
 pub fn parametic_core_collapse(r_s_0: f64, rho_s_0: f64, tau: f64) -> impl Fn(f64) -> f64 {
     // https://arxiv.org/pdf/2406.10753 eqn 1 & 2
     let rho_s = rho_s_0
@@ -600,7 +636,7 @@ pub fn parametic_core_collapse(r_s_0: f64, rho_s_0: f64, tau: f64) -> impl Fn(f6
 
 static RELHIC_TN: OnceLock<TnRelation> = OnceLock::new();
 
-pub fn relhic_temperature(_r: f64, rho: f64) -> f64 {
+pub fn relhic_temperature(rho: f64) -> f64 {
     // https://academic.oup.com/mnras/article/465/4/3913/2544386?login=false Fig 5
     let mut number_density = rho / M_PROTON; // nH kpc^-3
     number_density /= CM_IN_KPC.powi(3); // nH cm^-3
@@ -608,6 +644,39 @@ pub fn relhic_temperature(_r: f64, rho: f64) -> f64 {
     RELHIC_TN
         .get_or_init(|| TnRelation::from_csv("relhic_Tn_relation.csv").unwrap())
         .temperature_k(number_density)
+}
+
+/// Returns (Temperature in K, dlnT/dlnrho)
+pub fn relhic_temperature_and_slope(rho: f64) -> (f64, f64) {
+    let mut number_density = rho / M_PROTON;
+    number_density /= CM_IN_KPC.powi(3);
+
+    RELHIC_TN
+        .get_or_init(|| TnRelation::from_csv("relhic_Tn_relation.csv").unwrap())
+        .temperature_k_and_slope(number_density)
+}
+
+/// Computes mu and its logarithmic partial derivatives using central finite differences.
+/// eps = 1e-5 is large enough to avoid float cancellation but small enough for high accuracy.
+pub fn mu_log_derivatives<F>(rho: f64, t: f64, mu_func: F) -> (f64, f64)
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let eps = 1e-5;
+
+    // Fractional steps
+    let rho_plus = rho * (1.0 + eps);
+    let rho_minus = rho * (1.0 - eps);
+    let t_plus = t * (1.0 + eps);
+    let t_minus = t * (1.0 - eps);
+
+    // dln_mu / dln_rho
+    let dlnmu_dlnrho = (mu_func(rho_plus, t).ln() - mu_func(rho_minus, t).ln()) / (2.0 * eps);
+
+    // dln_mu / dln_T
+    let dlnmu_dlnt = (mu_func(rho, t_plus).ln() - mu_func(rho, t_minus).ln()) / (2.0 * eps);
+
+    (dlnmu_dlnrho, dlnmu_dlnt)
 }
 
 pub fn relhic_neutral_fraction(rho: f64, temperature: f64) -> f64 {
@@ -652,7 +721,7 @@ fn photo_ionization_rate(nh: f64, gamma_uvb: f64) -> f64 {
     ratio * gamma_uvb
 }
 
-fn get_profile_and_mass<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+fn get_profile_and_mass<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     params: &Vec<f64>,
     r_points: &Vec<f64>,
     temperature: &T,
@@ -689,7 +758,7 @@ fn get_profile_and_mass<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     (column_density, total_mass, full_rho_gas_points)
 }
 
-pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+pub fn evolution_profile<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     anchor_params: &Vec<f64>,
     temperature: &T,
     neutral_fraction: &V,
@@ -780,7 +849,7 @@ pub fn evolution_profile<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
 }
 
 pub fn instability_profile<
-    T: Fn(f64, f64) -> f64 + std::marker::Sync,
+    T: Fn(f64) -> (f64, f64) + std::marker::Sync,
     V: Fn(f64, f64) -> f64 + std::marker::Sync,
 >(
     anchor_params: &Vec<f64>,
@@ -897,7 +966,7 @@ pub fn instability_profile<
 }
 
 pub fn instability_showcase<
-    T: Fn(f64, f64) -> f64 + std::marker::Sync,
+    T: Fn(f64) -> (f64, f64) + std::marker::Sync,
     V: Fn(f64, f64) -> f64 + std::marker::Sync,
 >(
     params: &Vec<Vec<f64>>,
@@ -927,7 +996,7 @@ pub fn instability_showcase<
     }
     let r_points = get_r_points((r_min, r_max));
 
-    let mut ms_of_rhos: Vec<Vec<f64>> = params
+    let ms_of_rhos: Vec<Vec<f64>> = params
         .iter()
         .map(|params| {
             rho_axis
@@ -961,15 +1030,17 @@ pub fn instability_showcase<
                 m200, c200, params[2]
             ))
         })
-        .rev()
         .collect();
 
     let dashed = vec![true; ms_of_rhos.len()];
 
-    plot_functions(
+    let root = SVGBackend::new("figures/instability_comp.svg", (1024, 768)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
+
+    draw_functions_on_area(
+        &root,
         &rho_axis,
         &ms_of_rhos,
-        "figures/instability_comp.svg",
         "Insability in Some Cloud-9-like Halos",
         "Gas Central Density",
         "Total Gas Mas",
@@ -980,9 +1051,116 @@ pub fn instability_showcase<
         None,
     )
     .unwrap();
+
+    // Inset
+
+    let inset_rmax = 5e-5 * r_max;
+    let inset_rmin = INNER_BOUND;
+
+    const R_GRID_NUM: usize = 1000;
+    let inset_r_range: Vec<f64> = (0..R_GRID_NUM)
+        .into_iter()
+        .map(|i: usize| -> f64 {
+            (inset_rmin.ln()
+                + (i as f64 / (R_GRID_NUM - 1) as f64) * (inset_rmax.ln() - inset_rmin.ln()))
+            .exp()
+        })
+        .collect();
+
+    let mut dm_density = Vec::new();
+
+    let (mut rhos_max, mut rhos_min): (f64, f64) = (0.0, f64::MAX);
+    for p in params {
+        let dm_density_func = parametic_core_collapse(p[1], p[0], p[2]);
+        let dm_rho_pts: Vec<(f64, f64)> = inset_r_range
+            .iter()
+            .map(|&r| (r, dm_density_func(r)))
+            .collect();
+        dm_density.push(dm_rho_pts);
+
+        rhos_max = rhos_max.max(p[0]);
+        rhos_min = rhos_min.min(p[0]);
+    }
+    let (inset_rhomin, inset_rhomax) = (7e-1 * rhos_min, 5e0 * rhos_max);
+
+    let inset = root.clone().shrink((470, 270), (512, 400));
+    inset.fill(&WHITE).unwrap();
+
+    let mut inset_chart = ChartBuilder::on(&inset)
+        .margin(5)
+        .x_label_area_size(60)
+        .y_label_area_size(100)
+        .build_cartesian_2d(
+            (inset_rmin..inset_rmax).log_scale(),
+            (inset_rhomin..inset_rhomax).log_scale(),
+        )
+        .unwrap();
+
+    inset_chart
+        .configure_mesh()
+        .x_desc("r (kpc)")
+        .y_desc("Dark Matter Density (Mₛᵤₙ kpc⁻³)")
+        .x_label_style(("sans-serif", 25).into_font())
+        .y_label_style(("sans-serif", 25).into_font())
+        .x_labels(3)
+        .y_labels(10)
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .draw()
+        .unwrap();
+
+    let colors = vec![&BLUE, &RED, &GREEN, &CYAN, &MAGENTA];
+    for i in 0..params.len() {
+        let color = colors[i];
+        let (m200, c200) = rs_rhos_to_m200_c200(params[i][1], params[i][0]);
+        inset_chart
+            .draw_series(LineSeries::new(dm_density[i].clone(), color))
+            .unwrap()
+            .label(format!("M₂₀₀ = {:.2e}, c₂₀₀= {:.2}", m200, c200))
+            .legend(move |(x, y)| {
+                PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    ShapeStyle {
+                        color: color.mix(1.0),
+                        filled: false,
+                        stroke_width: 2,
+                    },
+                )
+            });
+    }
+
+    // // draw inset legend
+    // inset_chart
+    //     .configure_series_labels()
+    //     .label_font(("sans-serif", 25).into_font())
+    //     .position(SeriesLabelPosition::UpperRight)
+    //     .background_style(&WHITE.mix(0.8))
+    //     .border_style(&BLACK)
+    //     .draw()
+    //     .unwrap();
+
+    let (x_ticks, y_ticks) = (
+        log_ticks(inset_rmin, inset_rmax, 0),
+        log_ticks(inset_rhomin, inset_rhomax, -1),
+    );
+
+    draw_ticks_top_and_right(
+        &inset_chart,
+        &x_ticks,
+        &y_ticks,
+        (inset_rmin, inset_rmax),
+        (inset_rhomin, inset_rhomax),
+        5,
+        BLACK.stroke_width(1),
+    )
+    .unwrap();
+
+    root.present().unwrap();
+
+    svg_to_pdf("figures/instability_comp", 25.0).unwrap();
 }
 
-pub fn is_stable<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
+pub fn is_stable<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(
     params: &[f64],
     temperature: &T,
     neutral_fraction: &V,
@@ -991,42 +1169,50 @@ pub fn is_stable<T: Fn(f64, f64) -> f64, V: Fn(f64, f64) -> f64>(
     let r_bounds = (1e-5 * INNER_BOUND, 1e3 * halo.r_crit());
     let r_points = get_r_points(r_bounds);
 
-    let delta = params[3] * 0.02;
+    // Multiplicative factor to evenly spread in log space
+    let delta = 0.25_f64.exp();
 
     let dm_rho = parametic_core_collapse(params[1], params[0], params[2]);
     let dm_rho_points = get_rho_points(dm_rho, &r_points);
     let external_field = get_force_points(dm_rho_points, &r_points);
 
+    // Lower evaluation
     let (_neutral_rho_gas_points, lower_full_rho_gas_points) = get_hydrostatic_profile_outwards(
         &r_points,
         external_field.clone(),
         temperature,
         neutral_fraction,
-        params[3] - delta,
+        params[3] / delta,
     );
     let lower_total_mass = get_spacial_integral(&lower_full_rho_gas_points, &r_points);
+
+    // Upper evaluation
     let (_neutral_rho_gas_points, upper_full_rho_gas_points) = get_hydrostatic_profile_outwards(
         &r_points,
         external_field.clone(),
         temperature,
         neutral_fraction,
-        params[3] + delta,
+        params[3] * delta,
     );
     let upper_total_mass = get_spacial_integral(&upper_full_rho_gas_points, &r_points);
 
+    // dbg!(params[3] * delta);
+    // dbg!(params[3] / delta);
+    // dbg!(upper_total_mass, lower_total_mass);
     upper_total_mass > lower_total_mass
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ensemble_mcmc::MCMCOutput;
     use plotters::style::FontDesc;
     use plotters::style::{FontFamily, FontStyle};
 
     #[test]
     fn hydro_test() {
         const TEMP: f64 = 1e4;
-        let temperature = |_: f64, _: f64| -> f64 { TEMP };
+        let temperature = |_: f64| -> (f64, f64) { (TEMP, 0.0) };
         let neutral_fraction = |_: f64, _: f64| -> f64 { 0.0 };
         let mu = 0.5;
         let r_bounds = (1e-1 * INNER_BOUND, 1e10 * INNER_BOUND);
@@ -1173,7 +1359,7 @@ mod tests {
     #[test]
     fn harmonic_test() {
         const TEMP: f64 = 1e10;
-        let temperature = |_: f64, _: f64| -> f64 { TEMP };
+        let temperature = |_: f64| -> (f64, f64) { (TEMP, 0.0) };
         let neutral_fraction = |_: f64, _: f64| -> f64 { 0.0 };
         let r_bounds = (1e-3 * INNER_BOUND, 1e10 * INNER_BOUND);
         let r_points = get_r_points(r_bounds);
@@ -1423,5 +1609,70 @@ mod tests {
         if rho_s - rho_s_0 > 1e-5 || r_s - r_s_0 > 1e-5 || r_c > 1e-5 {
             panic!("cored profile does not recover nfw at tau = 0")
         }
+    }
+
+    #[test]
+    fn locally_isothermal_approx_check() {
+        let output = MCMCOutput::load("data/512_x_100k_stable.mcmc");
+        let params = output.unwrap().best_params;
+        let (rs, rhos) = m200_c200_to_rs_rhos(params[0], params[1]);
+        let halo = Halo::NFW(rhos, rs);
+        let r_points = get_r_points((INNER_BOUND, 1e1 * halo.r_crit()));
+
+        let (neutral_rho_points, rho_points) = core_collapse_background_3d_output(
+            relhic_temperature_and_slope,
+            relhic_neutral_fraction,
+            rhos,
+            rs,
+            params[2],
+            Some(params[3]),
+            &r_points,
+        );
+
+        let mut temp_points = Vec::new();
+        let mut mu_points = Vec::new();
+        for i in 0..r_points.len() {
+            temp_points.push(relhic_temperature(rho_points[i]));
+            let neutral_frac = neutral_rho_points[i] / rho_points[i];
+            mu_points.push(M_PROTON * 1.0 / (2.0 - neutral_frac));
+        }
+
+        let mut force_term = Vec::new();
+        let mut temp_term = Vec::new();
+        let mut mu_term = Vec::new();
+
+        let mut mid_r_points = Vec::new();
+        let mut n_points = Vec::new();
+        for i in 1..r_points.len() {
+            let delta_r = r_points[i] - r_points[i - 1];
+            mid_r_points.push(0.5 * (r_points[i] + r_points[i - 1]));
+
+            let mid_point_rho = 0.5 * (rho_points[i] + rho_points[i - 1]);
+            n_points.push(mid_point_rho / (M_PROTON * CM_IN_KPC.powi(3)));
+
+            force_term.push((rho_points[i] - rho_points[i - 1]) / delta_r);
+            temp_term.push((temp_points[i].ln() - temp_points[i - 1].ln()) / delta_r);
+            mu_term.push(-(mu_points[i].ln() - mu_points[i - 1].ln()) / delta_r);
+            // temp_term
+            //     .push(mid_point_rho * (temp_points[i].ln() - temp_points[i - 1].ln()) / delta_r);
+            // mu_term.push(-mid_point_rho * (mu_points[i].ln() - mu_points[i - 1].ln()) / delta_r);
+        }
+
+        plot_functions(
+            &mid_r_points,
+            &vec![n_points, temp_points, mu_points],
+            //&vec![force_term, temp_term, mu_term],
+            "figures/local_isothermal_test.svg",
+            "Force Term vs Gradient Terms",
+            "r (kpc)",
+            "dρ/dr",
+            vec![Some("rho".into()), Some("Temp".into()), Some("μ".into())],
+            // vec![Some("Force".into()), Some("Temp".into()), Some("μ".into())],
+            ("sans-serif", 25).into_font(),
+            vec![false, true, true],
+            None,
+            None,
+        )
+        .unwrap();
     }
 }

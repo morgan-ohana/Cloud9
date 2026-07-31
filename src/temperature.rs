@@ -80,6 +80,39 @@ impl TnRelation {
         let log_t = self.log_t_at_log_nh(log_nh);
         10f64.powf(log_t)
     }
+
+    /// Returns (Temperature in K, dlnT/dlnrho)
+    /// Because the interpolation is linear in log-log space, dlnT/dlnrho
+    /// is exactly the slope of the current segment.
+    pub fn temperature_k_and_slope(&self, nh_cm3: f64) -> (f64, f64) {
+        let log_nh = nh_cm3.log10();
+        let n = self.log_nh.len();
+
+        // physically motivated linear iterpolation T ~ nH^alpha
+        let (log_t, slope) = if log_nh <= self.log_nh[0] {
+            let s = (self.log_t[10] - self.log_t[0]) / (self.log_nh[10] - self.log_nh[0]);
+            (self.log_t[0] + s * (log_nh - self.log_nh[0]), s)
+        // High density regime clamped to constant T
+        } else if log_nh >= self.log_nh[n - 1] {
+            (self.log_t[n - 1], 0.0)
+        // Binary search for interval and linearly iterpolate
+        } else {
+            let idx = self
+                .log_nh
+                .partition_point(|&x| x < log_nh)
+                .saturating_sub(1);
+
+            let x0 = self.log_nh[idx];
+            let x1 = self.log_nh[idx + 1];
+            let y0 = self.log_t[idx];
+            let y1 = self.log_t[idx + 1];
+
+            let s = (y1 - y0) / (x1 - x0);
+            (y0 + s * (log_nh - x0), s)
+        };
+
+        (10f64.powf(log_t), slope)
+    }
 }
 
 #[cfg(test)]

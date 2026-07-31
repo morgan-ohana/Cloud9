@@ -1,30 +1,44 @@
 use corner_plot::{CornerPlotFormat, plot_histogram};
 use ensemble_mcmc::MCMCOutput;
-use plotters::coord::ranged1d::ValueFormatter;
+use plotters::coord::Shift;
+use plotters::prelude::full_palette::ORANGE_700;
 use plotters::prelude::*;
 use rayon::prelude::*;
 
 use crate::constants::*;
 use crate::fitting;
 use crate::halo::{Halo, McrSource, deviation, m200_c200_to_rs_rhos};
+use crate::hydrostatics::core_collapse_background_3d_output;
 use crate::hydrostatics::instability_showcase;
+use crate::hydrostatics::is_stable;
 use crate::hydrostatics::parametic_core_collapse;
+use crate::hydrostatics::relhic_temperature_and_slope;
 use crate::hydrostatics::{core_collapse_background, relhic_neutral_fraction, relhic_temperature};
 // use crate::logging::load_file;
+use crate::plot_utils::{build::*, frame::*, legend::*, utils::*};
 use crate::utils::make_file_name;
-use crate::utils::svg_to_pdf;
+use core::f64;
 use std::f64::consts::PI;
 
-fn fmt_num(num: &f64) -> String {
-    if num.abs() <= 1e-100 {
-        // Probably true 0
-        return format!("0");
-    }
-
-    if num.abs() >= 1000.0 || num.abs() <= 0.1 {
-        format!("{:.1e}", num)
+/// 1.0e9 -> "1.0\times 10^{9}" (no $...$, so it composes into larger expressions)
+pub fn sci_latex(x: f64) -> String {
+    let exp = x.abs().log10().floor() as i32;
+    let mantissa = x / 10f64.powi(exp);
+    if (mantissa - 1.0).abs() < 1e-6 {
+        format!("10^{{{exp}}}")
     } else {
-        format!("{:.1}", num)
+        format!("{mantissa:.1}\\times 10^{{{exp}}}")
+    }
+}
+
+pub fn fmt_num(num: &f64) -> String {
+    if num.abs() <= 1e-100 {
+        return "$0$".to_string();
+    }
+    if num.abs() >= 1000.0 || num.abs() <= 0.1 {
+        format!("${}$", sci_latex(*num))
+    } else {
+        format!("${num:.1}$")
     }
 }
 
@@ -52,7 +66,7 @@ pub fn plot_functions(
     Ok(())
 }
 
-fn draw_functions_on_area<DB: DrawingBackend>(
+pub fn draw_functions_on_area<DB: DrawingBackend>(
     area: &DrawingArea<DB, plotters::coord::Shift>,
     x_points: &Vec<f64>,
     y_points: &Vec<Vec<f64>>,
@@ -86,8 +100,8 @@ where
         // Some(data_points) => {
         //     // x_min = x_points[0];
         //     // x_max = *x_points.last().unwrap();
-        //     // x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
-        //     // x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
+        //     x_min = data_points[0].0 - 0.1 * data_spread.unwrap();
+        //     x_max = data_points.last().unwrap().0 + 0.1 * data_spread.unwrap();
         // }
         None => {
             x_min = x_points[0];
@@ -161,7 +175,7 @@ where
             },
         y_max
             * match y_max.signum() {
-                1.0 => 1.1,
+                1.0 => 1.25,
                 -1.0 => 0.9,
                 _ => panic!("number has no sign, is probably NaN"),
             },
@@ -179,9 +193,9 @@ where
     let log_scale = true;
 
     let mut chart = ChartBuilder::on(area)
-        .caption(title, ("sans-serif", 40))
-        .margin(10)
-        .x_label_area_size(60) //30)
+        .caption(title, ("Times New Roman", 40))
+        .margin(30)
+        .x_label_area_size(40) //30)
         .y_label_area_size(120) //60)
         .build_cartesian_2d(x_range, y_range)?;
 
@@ -194,7 +208,7 @@ where
         .x_label_formatter(&fmt_num)
         .y_label_formatter(&fmt_num)
         .x_labels(3)
-        .y_labels(5)
+        .y_labels(15)
         .axis_style(BLACK.stroke_width(1))
         .draw()?;
 
@@ -209,7 +223,7 @@ where
 
     let dashed_count = dashed.iter().filter(|&&d| d).count().max(1);
     let mut dashed_index = 0;
-    let mut make_legend = false;
+    let mut legend_entries: Vec<LegendEntry<DB>> = Vec::new();
     for n in 0..y_points.len() {
         let color = if dashed[n] {
             let t = dashed_index as f64 / (dashed_count - 1).max(1) as f64;
@@ -242,34 +256,25 @@ where
         };
 
         if let Some(legend_text) = &legends[n] {
-            series.label(legend_text).legend(move |(x, y)| {
-                PathElement::new(
-                    vec![(x, y), (x + 20, y)],
-                    ShapeStyle {
-                        color: color.mix(1.0),
-                        filled: false,
-                        stroke_width: 2,
-                    },
-                )
+            legend_entries.push(LegendEntry {
+                tex: legend_text.clone(),
+                proxy: latex_to_proxy(legend_text),
+                marker: if dashed[n] {
+                    LegendMarker::Dashed(color, 5, 3)
+                } else {
+                    LegendMarker::Line(color)
+                },
             });
-
-            make_legend = true
         }
-    }
-    if make_legend {
-        // Configure and draw legend
-        chart
-            .configure_series_labels()
-            .label_font(font)
-            .position(SeriesLabelPosition::UpperRight)
-            .background_style(&WHITE.mix(0.8))
-            .border_style(&BLACK)
-            .draw()?;
     }
 
     if let Some(data_points) = data {
         chart
-            .draw_series(data_points.iter().map(|point| Circle::new(*point, 5, &RED)))
+            .draw_series(
+                data_points
+                    .iter()
+                    .map(|point| Circle::new(*point, 5, &BLACK)),
+            )
             .unwrap();
     }
 
@@ -306,8 +311,19 @@ where
         )?;
     }
 
+    if !legend_entries.is_empty() {
+        draw_legend(
+            &chart.plotting_area().strip_coord_spec(),
+            &legend_entries,
+            ("sans-serif", 25).into_font(),
+            LegendAnchor::UpperRight,
+            10,
+            None, // or Some(px) to force the box width
+        )?;
+    }
+
     let (x_ticks, y_ticks) = if log_scale {
-        (log_ticks(x_min, x_max, 0), log_ticks(y_min, y_max, 0))
+        (log_ticks(x_min, x_max, 0), log_ticks(y_min, y_max, -1))
     } else {
         (linear_ticks(x_min, x_max, 3), linear_ticks(y_min, y_max, 5))
     };
@@ -326,363 +342,525 @@ where
     Ok(())
 }
 
-fn linear_ticks(min: f64, max: f64, n: usize) -> Vec<f64> {
-    let step = (max - min) / (n as f64);
-    // Round step to a "nice" number (1, 2, 2.5, 5 × power of 10)
-    let magnitude = 10f64.powf(step.log10().floor());
-    let nice_step = [1.0, 2.0, 2.5, 5.0, 10.0]
-        .iter()
-        .map(|&f| f * magnitude)
-        .find(|&s| s >= step)
-        .unwrap_or(magnitude);
-
-    // Start at the first multiple of nice_step >= min
-    let first = (min / nice_step).ceil() * nice_step;
-
-    std::iter::successors(Some(first), |&v| {
-        let next = v + nice_step;
-        if next <= max + 1e-10 * nice_step {
-            Some(next)
-        } else {
-            None
-        }
-    })
-    .collect()
-}
-
-fn log_ticks(min: f64, max: f64, level: i32) -> Vec<f64> {
-    assert!(min > 0.0);
-    assert!(max > 0.0);
-    let exp_min = min.log10().floor() as i32;
-    let exp_max = max.log10().ceil() as i32;
-
-    if level >= 0 {
-        // Coarser than one-per-decade: tick every 10^level decades
-        let stride = 10i32.pow(level as u32);
-        let first_exp = (exp_min as f64 / stride as f64).ceil() as i32 * stride;
-        std::iter::successors(Some(first_exp), |&e| Some(e + stride))
-            .take_while(|&e| e <= exp_max)
-            .map(|exp| 10f64.powi(exp))
-            .filter(|&v| v >= min * (1.0 - 1e-10) && v <= max * (1.0 + 1e-10))
-            .collect()
-    } else {
-        // Sub-decade: step = 10^(exp + level + 1) within each decade.
-        // Decade boundaries are generated as k=0 of each decade — no double-counting.
-        (exp_min..=exp_max)
-            .flat_map(move |exp| {
-                let decade_start = 10f64.powi(exp);
-                let step = 10f64.powi(exp + level + 1);
-                let next_decade = 10f64.powi(exp + 1);
-                (0..)
-                    .map(move |k| decade_start + k as f64 * step)
-                    .take_while(move |&v| v < next_decade * (1.0 - 1e-10))
-            })
-            .filter(|&v| v >= min * (1.0 - 1e-10) && v <= max * (1.0 + 1e-10))
-            .collect()
-    }
-}
-
-fn draw_ticks_top_and_right<
-    DB: DrawingBackend,
-    X: Ranged<ValueType = f64> + ValueFormatter<f64>,
-    Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
->(
-    chart: &ChartContext<DB, Cartesian2d<X, Y>>,
-    x_ticks: &[f64],
-    y_ticks: &[f64],
-    (x_min, x_max): (f64, f64),
-    (y_min, y_max): (f64, f64),
-    tick_size: i32, // pixels; positive = inward
-    style: ShapeStyle,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    DB::ErrorType: 'static,
-{
-    let coord_spec = chart.as_coord_spec();
-
-    let (x_px_range, y_px_range) = (
-        coord_spec.get_x_axis_pixel_range(),
-        coord_spec.get_y_axis_pixel_range(),
-    );
-
-    let (x_offset, y_offset) = (
-        x_px_range.start.min(x_px_range.end),
-        y_px_range.start.min(y_px_range.end),
-    );
-
-    let area = chart.plotting_area().strip_coord_spec();
-    let (px_left, py_top) = chart.as_coord_spec().translate(&(x_min, y_max));
-    let (px_right, py_bottom) = chart.as_coord_spec().translate(&(x_max, y_min));
-    let (ly_top, ly_bottom) = (py_top - y_offset, py_bottom - y_offset);
-    let (lx_left, lx_right) = (px_left - x_offset, px_right - x_offset);
-
-    // Top edge: translate each x tick at y_max to get its pixel position
-    area.draw(&PathElement::new(
-        vec![(lx_left, ly_top), (lx_right, ly_top)],
-        style,
-    ))?;
-    for &x in x_ticks {
-        let (px, py_top) = chart.as_coord_spec().translate(&(x, y_max));
-        let (lx, ly) = (px - x_offset, py_top - y_offset);
-        area.draw(&PathElement::new(
-            vec![(lx, ly), (lx, ly + tick_size)],
-            style,
-        ))?;
-    }
-
-    // Right edge: translate each y tick at x_max to get its pixel position
-    area.draw(&PathElement::new(
-        vec![(lx_right, ly_top), (lx_right, ly_bottom)],
-        style,
-    ))?;
-    for &y in y_ticks {
-        let (px_right, py) = chart.as_coord_spec().translate(&(x_max, y));
-        let (lx, ly) = (px_right - x_offset, py - y_offset);
-        area.draw(&PathElement::new(
-            vec![(lx, ly), (lx - tick_size, ly)],
-            style,
-        ))?;
-    }
-
-    // Top-right corner tick dot (optional, closes the box)
-    let (px_right, py_top) = chart.as_coord_spec().translate(&(x_max, y_max));
-    let (lx, ly) = (px_right - x_offset, py_top - y_offset);
-    area.draw(&PathElement::new(
-        vec![(lx, ly), (lx - tick_size, ly)],
-        style,
-    ))?;
-    area.draw(&PathElement::new(
-        vec![(lx, ly), (lx, ly + tick_size)],
-        style,
-    ))?;
-
-    Ok(())
-}
-
 pub fn instability_plot() {
     let stable = MCMCOutput::load("data/512_x_100k_stable.mcmc").unwrap();
     let unstable = MCMCOutput::load("data/512_x_100k_unstable.mcmc").unwrap();
 
     let mut stable_params = stable.best_params;
-    let mut unstable_params = unstable.best_params;
+    let mut unstable_params = unstable.chain[1].clone();
+    dbg!(&stable_params);
+    dbg!(&unstable_params);
 
     (stable_params[1], stable_params[0]) = m200_c200_to_rs_rhos(stable_params[0], stable_params[1]);
     (unstable_params[1], unstable_params[0]) =
         m200_c200_to_rs_rhos(unstable_params[0], unstable_params[1]);
 
+    dbg!(is_stable(
+        &stable_params,
+        &relhic_temperature_and_slope,
+        &relhic_neutral_fraction
+    ));
+    dbg!(is_stable(
+        &unstable_params,
+        &relhic_temperature_and_slope,
+        &relhic_neutral_fraction
+    ));
     instability_showcase(
         &vec![stable_params, unstable_params],
-        (3e3, 1e8),
-        &relhic_temperature,
+        (1.5e3, 1e8),
+        &relhic_temperature_and_slope,
         &relhic_neutral_fraction,
-        ("sans-serif", 30).into_font(),
+        ("Times New Roman", 30).into_font(),
     );
 }
 
 pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
-    let sidm_output = MCMCOutput::load("data/512_x_100k_stable.mcmc").unwrap();
-    dbg!(&sidm_output.best_params);
-    let (sidm_m200, sidm_c200) = (sidm_output.best_params[0], sidm_output.best_params[1]);
-    let (sidm_rs, sidm_rhos) = m200_c200_to_rs_rhos(sidm_m200, sidm_c200);
-    let sidm_halo = Halo::NFW(sidm_rhos, sidm_rs);
+    let mut params: Vec<Vec<f64>> = Vec::new();
+    let mut labels = Vec::new();
 
-    let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0_stable.mcmc")
+    // SIDM BEST
+    let sidm_output = MCMCOutput::load("data/512_x_100k_stable_bulk.mcmc").unwrap();
+    // params.push(sidm_output.best_params.clone());
+    // labels.push(Some(format!("SIDM τ={:.2}", sidm_output.best_params[2])));
+
+    // CDM BEST
+    let cdm_params = MCMCOutput::load("data/512_x_100k_sigma=0_stable_bulk.mcmc")
         .unwrap()
         .best_params;
-    dbg!(&cdm_params);
-    let (cdm_m200, cdm_c200) = (cdm_params[0], cdm_params[1]);
-    let (cdm_rs, cdm_rhos) = m200_c200_to_rs_rhos(cdm_m200, cdm_c200);
-    let cdm_halo = Halo::NFW(cdm_rhos, cdm_rs);
+    params.push(vec![cdm_params[0], cdm_params[1], 0.0, cdm_params[2]]);
+    labels.push(Some(format!("$\\textrm{{NFW}}$")));
 
+    // CORE FORMING
+    let core_params = sidm_output
+        .chain
+        .iter()
+        .zip(&sidm_output.log_likelihoods)
+        .filter(|(p, _)| p[2] > 0.175 && p[2] < 0.225)
+        .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
+        .map(|(p, _)| p)
+        .unwrap();
+    params.push(core_params.clone());
+    labels.push(Some(format!(
+        "$\\textrm{{SIDM}} \\, \\tau={:.2}$",
+        core_params[2]
+    )));
+
+    // COLLAPSE
     let collapse_params = sidm_output
         .chain
-        .into_iter()
-        .zip(sidm_output.log_likelihoods)
+        .iter()
+        .zip(&sidm_output.log_likelihoods)
         .filter(|(p, _)| p[2] > 0.95)
         .max_by(|(_, la), (_, lb)| la.partial_cmp(lb).unwrap())
         .map(|(p, _)| p)
         .unwrap();
-    dbg!(&collapse_params);
-    let (collapse_m200, collapse_c200) = (collapse_params[0], collapse_params[1]);
-    let (collapse_rs, collapse_rhos) = m200_c200_to_rs_rhos(collapse_m200, collapse_c200);
-    let collapse_halo = Halo::NFW(collapse_rhos, collapse_rs);
+    params.push(collapse_params.clone());
+    labels.push(Some(format!(
+        "$\\textrm{{SIDM}} \\,\\tau={:.2}$",
+        collapse_params[2]
+    )));
 
-    let r_max = 1e2
-        * cdm_halo
-            .r_crit()
-            .max(sidm_halo.r_crit())
-            .max(collapse_halo.r_crit()); //shared r_max so they share r_grid
+    let mut r_max: f64 = 0.0;
+    let mut rs_rhos: Vec<(f64, f64)> = Vec::new();
+    for p in &params {
+        let (m200, c200, tau) = (p[0], p[1], p[2]);
+        let (rs, rhos) = m200_c200_to_rs_rhos(m200, c200);
+        let halo = Halo::NFW(rs, rhos);
+        let dev = deviation(m200, c200, McrSource::DiemerJoyce2019);
+        let mut t_sigma_m = 150.0 * tau / (0.75 * rhos * rs * (4.0 * PI * GG * rhos).sqrt())
+            * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
 
-    let cdm_fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        cdm_rhos,
-        cdm_rs,
-        0.0,
-        Some(cdm_params[2]),
-        (INNER_BOUND, r_max),
-        false,
-    );
+        r_max = r_max.max(halo.r_crit());
 
-    let tau = sidm_output.best_params[2];
-    let sidm_fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        sidm_rhos,
-        sidm_rs,
-        tau,
-        Some(sidm_output.best_params[3]),
-        (INNER_BOUND, r_max),
-        false,
-    );
+        rs_rhos.push((rs, rhos));
+    }
+    r_max *= 1e2;
 
-    let collapse_tau = collapse_params[2];
-    let collapse_fit = core_collapse_background(
-        relhic_temperature,
-        relhic_neutral_fraction,
-        collapse_rhos,
-        collapse_rs,
-        collapse_tau,
-        Some(collapse_params[3]),
-        (INNER_BOUND, r_max),
-        false,
-    );
+    let (rs_min, rs_max) = rs_rhos
+        .iter()
+        .map(|(rs, _)| rs)
+        .fold((f64::MAX, f64::MIN), |(min, max), &val| {
+            (min.min(val), max.max(val))
+        });
+
+    let (rhos_min, rhos_max) = rs_rhos
+        .iter()
+        .map(|(_, rhos)| rhos)
+        .fold((f64::MAX, f64::MIN), |(min, max), &val| {
+            (min.min(val), max.max(val))
+        });
+
+    let mut gas_column_density = Vec::new();
+    let mut ang_points = Vec::new();
+    for i in 0..params.len() {
+        let (tau, rhoc) = (params[i][2], params[i][3]);
+        let (rs, rhos) = rs_rhos[i];
+
+        let fit = core_collapse_background(
+            relhic_temperature_and_slope,
+            relhic_neutral_fraction,
+            rhos,
+            rs,
+            tau,
+            Some(rhoc),
+            (INNER_BOUND, r_max),
+            false,
+        );
+        if i == 0 {
+            ang_points = fit.0;
+        }
+        gas_column_density.push(fit.1);
+    }
 
     let root = SVGBackend::new("figures/cdm_vs_sidm_stable.svg", (1024, 768)).into_drawing_area();
     root.fill(&WHITE).unwrap();
 
-    draw_functions_on_area(
-        &root,
-        &cdm_fit.0,
-        &vec![cdm_fit.1, sidm_fit.1, collapse_fit.1],
-        "Best CDM and SIDM fits",
-        "r (arcmin)",
-        "H₁ Column Density (cm⁻²)",
-        vec![
-            Some(String::from("CDM")),
-            Some(format!("SIDM τ={tau:.2}")),
-            Some(format!("SIDM τ={collapse_tau:.2}")),
-        ],
-        ("sans-serif", 25).into_font(),
-        vec![false, true, true],
-        Some(&data.points),
-        Some(&data.y_err),
+    let (x_min, x_max) = (0.5 * data.points[0].0, 2.0 * data.points.last().unwrap().0);
+    let x_range = x_min..x_max;
+
+    let mut y_min = f64::MAX;
+    let mut y_max = f64::MIN;
+    for &(_, y) in &data.points {
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+    for &(yl, yh) in &data.y_err {
+        y_max = y_max.max(yh);
+        if yl > 1e-10 {
+            y_min = y_min.min(yl);
+        }
+    }
+    for (_, col) in gas_column_density.iter().enumerate() {
+        for (i, &y) in col.iter().enumerate() {
+            if !x_range.contains(&ang_points[i]) {
+                continue;
+            }
+            y_min = y_min.min(y);
+            y_max = y_max.max(y);
+        }
+    }
+
+    let (y_min, y_max) = (
+        (y_min + 1e-4)
+            * match y_min.signum() {
+                1.0 => 0.9,
+                -1.0 => 1.1,
+                _ => panic!("number has no sign, is probably NaN"),
+            },
+        y_max
+            * match y_max.signum() {
+                1.0 => 1.25,
+                -1.0 => 0.9,
+                _ => panic!("number has no sign, is probably NaN"),
+            },
+    );
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("", ("Times New Roman", 40))
+        .margin(30)
+        .x_label_area_size(40)
+        .y_label_area_size(100)
+        .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())
+        .unwrap();
+
+    chart
+        .configure_mesh()
+        .x_desc("$r \\,(\\mathrm{arcmin})$")
+        .y_desc("$\\mathrm{H}\\textsc{i}\\, \\textrm{Column Density}\\, (\\mathrm{cm}^{-2}$)")
+        .x_label_style(("Times New Roman", 25).into_font())
+        .y_label_style(("Times New Roman", 25).into_font())
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .x_labels(3)
+        .y_labels(15)
+        .axis_style(BLACK.stroke_width(3))
+        .draw()
+        .unwrap();
+
+    let mut legend_entries: Vec<LegendEntry<SVGBackend>> = Vec::new();
+    let colors = vec![BLACK, BLUE, RED];
+    for (n, col) in gas_column_density.iter().enumerate() {
+        let color = colors[n];
+        let profile: Vec<(f64, f64)> = window_series(
+            &ang_points
+                .iter()
+                .copied()
+                .zip(col.iter().copied())
+                .collect::<Vec<(f64, f64)>>(),
+            (x_min, x_max),
+            (y_min, y_max),
+        );
+
+        chart
+            .draw_series(DashedLineSeries::new(
+                profile,
+                10,
+                10,
+                ShapeStyle {
+                    color: color.mix(1.0),
+                    filled: false,
+                    stroke_width: 2,
+                },
+            ))
+            .unwrap();
+
+        if let Some(tex) = &labels[n] {
+            legend_entries.push(LegendEntry {
+                tex: tex.clone(),
+                proxy: latex_to_proxy(tex) + "11", //manual buffer characters
+                marker: LegendMarker::Dashed(color, 5, 3),
+            });
+        }
+    }
+
+    chart
+        .draw_series(
+            data.points
+                .iter()
+                .map(|p| Circle::new(*p, 5, Into::<ShapeStyle>::into(&ORANGE_700).filled())),
+        )
+        .unwrap();
+
+    {
+        let cap_width = 0.05; // fraction of x in log space
+        chart
+            .draw_series(data.points.iter().zip(data.y_err.iter()).flat_map(
+                |(&(x, _), &(yl, yh))| {
+                    let (x_left, x_right) = (x * (1.0 - cap_width), x * (1.0 + cap_width));
+                    let bar_style = ORANGE_700.stroke_width(3);
+                    let mut bar_series = vec![PathElement::new(vec![(x, yl), (x, yh)], bar_style)];
+
+                    if yl > y_min {
+                        bar_series.push(PathElement::new(
+                            vec![(x_left, yl), (x_right, yl)],
+                            bar_style,
+                        ));
+                    }
+                    if yh < y_max {
+                        bar_series.push(PathElement::new(
+                            vec![(x_left, yh), (x_right, yh)],
+                            bar_style,
+                        ));
+                    }
+                    bar_series
+                },
+            ))
+            .unwrap();
+    }
+
+    draw_legend(
+        &chart.plotting_area().strip_coord_spec(),
+        &legend_entries,
+        ("Times New Roman", 25).into_font(),
+        LegendAnchor::UpperRight,
+        10,
+        None,
     )
     .unwrap();
 
-    // Build Inset
-    println!("Building Inset!");
+    let (x_ticks, y_ticks) = (log_ticks(x_min, x_max, 0), log_ticks(y_min, y_max, 0));
+    draw_ticks_top_and_right(
+        &chart,
+        &x_ticks,
+        &y_ticks,
+        (x_min, x_max),
+        (y_min, y_max),
+        5,
+        BLACK.stroke_width(3),
+    )
+    .unwrap();
 
-    let r_dm_min = 1e-2 * cdm_rs.min(sidm_rs).min(collapse_rs);
-    let r_dm_max = 1e2 * cdm_rs.max(sidm_rs).max(collapse_rs);
+    fit_comp_plot(data, params, labels);
 
-    let inset = root.clone().shrink((170, 290), (512, 400));
-    inset.fill(&WHITE).unwrap();
+    root.present().unwrap();
 
-    let rho_dm_max = cdm_rhos.min(sidm_rhos).min(collapse_rhos) * 1e3;
-    let rho_dm_min = cdm_rhos.max(sidm_rhos).max(collapse_rhos) * 1e-3;
+    svg_to_pdf("figures/cdm_vs_sidm_stable", 25.0).unwrap();
+}
 
-    let mut inset_chart = ChartBuilder::on(&inset)
-        .margin(5)
-        .x_label_area_size(60)
-        .y_label_area_size(120)
-        .build_cartesian_2d(
-            (r_dm_min..r_dm_max).log_scale(),
-            (rho_dm_min..rho_dm_max).log_scale(),
-        )
+pub fn fit_comp_plot(data: &fitting::Data, params: Vec<Vec<f64>>, labels: Vec<Option<String>>) {
+    let mut rs_rhos: Vec<(f64, f64)> = Vec::new();
+    for p in &params {
+        let (m200, c200, tau) = (p[0], p[1], p[2]);
+        let (rs, rhos) = m200_c200_to_rs_rhos(m200, c200);
+        let dev = deviation(m200, c200, McrSource::DiemerJoyce2019);
+        let mut t_sigma_m = 150.0 * tau / (0.75 * rhos * rs * (4.0 * PI * GG * rhos).sqrt())
+            * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
+        t_sigma_m *= CM_IN_KPC.powi(2) / G_IN_MSUN; // Gyr cm^2 / g
+
+        rs_rhos.push((rs, rhos));
+    }
+
+    let (rs_min, rs_max) = rs_rhos
+        .iter()
+        .map(|(rs, _)| rs)
+        .fold((f64::MAX, f64::MIN), |(min, max), &val| {
+            (min.min(val), max.max(val))
+        });
+
+    let (rhos_min, rhos_max) = rs_rhos
+        .iter()
+        .map(|(_, rhos)| rhos)
+        .fold((f64::MAX, f64::MIN), |(min, max), &val| {
+            (min.min(val), max.max(val))
+        });
+
+    let (rmin, rmax) = (1e-2 * rs_min, 5e0 * rs_max);
+    let (rhomin, rhomax) = (1e-2 * rhos_min, 5e2 * rhos_max);
+    const R_GRID_NUM: usize = 1000;
+    let inset_r_range: Vec<f64> = (0..R_GRID_NUM)
+        .into_iter()
+        .map(|i: usize| -> f64 {
+            (rmin.ln() + (i as f64 / (R_GRID_NUM - 1) as f64) * (rmax.ln() - rmin.ln())).exp()
+        })
+        .collect();
+
+    let mut gas_3d_density: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut gas_neutral_3d_density: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut dm_density = Vec::new();
+    for i in 0..params.len() {
+        let (tau, rhoc) = (params[i][2], params[i][3]);
+        let (rs, rhos) = rs_rhos[i];
+
+        let dm_density_func = parametic_core_collapse(rs, rhos, tau);
+        let dm_rho_pts: Vec<(f64, f64)> = inset_r_range
+            .iter()
+            .map(|&r| (r, dm_density_func(r)))
+            .collect();
+        dm_density.push(window_series(&dm_rho_pts, (rmin, rmax), (rhomin, rhomax)));
+
+        let gas_3d = core_collapse_background_3d_output(
+            relhic_temperature_and_slope,
+            relhic_neutral_fraction,
+            rhos,
+            rs,
+            tau,
+            Some(rhoc),
+            &inset_r_range,
+        );
+        gas_3d_density.push(window_series(
+            &inset_r_range
+                .clone()
+                .into_iter()
+                .zip(gas_3d.1)
+                .collect::<Vec<(f64, f64)>>(),
+            (rmin, rmax),
+            (rhomin, rhomax),
+        ));
+        gas_neutral_3d_density.push(window_series(
+            &inset_r_range
+                .clone()
+                .into_iter()
+                .zip(gas_3d.0)
+                .collect::<Vec<(f64, f64)>>(),
+            (rmin, rmax),
+            (rhomin, rhomax),
+        ));
+    }
+
+    let root = SVGBackend::new("figures/fit_comparison.svg", (1024, 768)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("", ("Times New Roman", 40))
+        .margin(30)
+        .x_label_area_size(40)
+        .y_label_area_size(100)
+        .build_cartesian_2d((rmin..rmax).log_scale(), (rhomin..rhomax).log_scale())
         .unwrap();
-    // .set_secondary_coord(0..1, 0..1); // no-op placeholder if you don't need secondary axis
 
-    inset_chart
+    chart
         .configure_mesh()
-        .x_desc("r (kpc)")
-        .y_desc("Dark Matter Density (Mₛᵤₙ kpc⁻³)")
-        .x_label_style(("sans-serif", 25).into_font())
-        .y_label_style(("sans-serif", 25).into_font())
+        .x_desc("$r\\, (\\mathrm{kpc})$")
+        .y_desc("$\\rho$ ($\\mathrm{M}_\\odot \\mathrm{kpc}^{-3}$)")
+        .x_label_style(("Times New Roman", 25).into_font())
+        .y_label_style(("Times New Roman", 25).into_font())
         .x_labels(3)
         .y_labels(3)
         .x_label_formatter(&fmt_num)
         .y_label_formatter(&fmt_num)
+        .axis_style(BLACK.stroke_width(3))
         .draw()
         .unwrap();
 
     // Build/Plot density profiles
 
-    const R_GRID_NUM: usize = 1000;
-    let r_range: Vec<f64> = (0..R_GRID_NUM)
-        .into_iter()
-        .map(|i: usize| -> f64 {
-            (r_dm_min.ln() + (i as f64 / (R_GRID_NUM - 1) as f64) * (r_dm_max.ln() - r_dm_min.ln()))
-                .exp()
-        })
-        .collect();
+    let colors = vec![BLACK, BLUE, RED];
+    let mut legend_entries: Vec<LegendEntry<SVGBackend>> = Vec::new();
+    for i in 0..params.len() {
+        let color = colors[i];
+        chart
+            .draw_series(LineSeries::new(
+                dm_density[i].clone(),
+                color.stroke_width(2),
+            ))
+            .unwrap();
 
-    for (rs, rhos, m200, c200, tau, color) in [
-        (cdm_rs, cdm_rhos, cdm_m200, cdm_c200, 0.0, &BLACK),
-        (
-            sidm_rs,
-            sidm_rhos,
-            sidm_m200,
-            sidm_c200,
-            sidm_output.best_params[2],
-            &BLUE,
-        ),
-        (
-            collapse_rs,
-            collapse_rhos,
-            collapse_m200,
-            collapse_c200,
-            collapse_params[2],
-            &RED,
-        ),
-    ] {
-        let func = parametic_core_collapse(rs, rhos, tau);
-        let dm_rho_pts: Vec<(f64, f64)> = r_range.iter().map(|&r| (r, func(r))).collect();
-        inset_chart
-            .draw_series(LineSeries::new(dm_rho_pts, color))
-            .unwrap()
-            .label(format!("M₂₀₀ = {:.2e}, C₂₀₀= {:.2}", m200, c200))
-            .legend(move |(x, y)| {
-                PathElement::new(
-                    vec![(x, y), (x + 20, y)],
-                    ShapeStyle {
-                        color: color.mix(1.0),
-                        filled: false,
-                        stroke_width: 2,
-                    },
-                )
-            });
+        let tex = format!(
+            "$\\textrm{{Dark Matter:}} \\, M_{{200}}$={}, $c_{{200}}$={}",
+            fmt_num(&params[i][0]),
+            fmt_num(&params[i][1]),
+        );
+        legend_entries.push(LegendEntry {
+            proxy: latex_to_proxy(&tex),
+            tex,
+            marker: LegendMarker::Line(color),
+        });
     }
 
-    // Configure and draw legend
-    inset_chart
-        .configure_series_labels()
-        .label_font(("sans-serif", 25).into_font())
-        .position(SeriesLabelPosition::UpperRight)
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
-        .draw()
-        .unwrap();
+    for i in 0..params.len() {
+        let color = colors[i];
 
-    let (x_ticks, y_ticks) = (
-        log_ticks(r_dm_min, r_dm_max, 0),
-        log_ticks(rho_dm_min, rho_dm_max, 0),
-    );
+        chart
+            .draw_series(DashedLineSeries::new(
+                gas_3d_density[i].clone(),
+                3,
+                10,
+                ShapeStyle {
+                    color: color.mix(1.0),
+                    filled: false,
+                    stroke_width: 2,
+                },
+            ))
+            .unwrap();
+        let tex = format!("$\\textrm{{Gas:}}\\, \\rho_c$={}", fmt_num(&params[i][3]));
+        legend_entries.push(LegendEntry {
+            proxy: latex_to_proxy(&tex),
+            tex,
+            marker: LegendMarker::Dashed(color, 2, 4),
+        });
+    }
+    for i in 0..params.len() {
+        let color = colors[i];
+        chart
+            .draw_series(DashedLineSeries::new(
+                gas_neutral_3d_density[i].clone(),
+                10,
+                10,
+                ShapeStyle {
+                    color: color.mix(1.0),
+                    filled: false,
+                    stroke_width: 2,
+                },
+            ))
+            .unwrap();
+    }
+
+    let tex = format!("$\\textrm{{Neutral Gas}}$");
+    let marker_colors = colors.clone();
+    legend_entries.push(LegendEntry {
+        proxy: latex_to_proxy(&tex),
+        tex,
+        marker: LegendMarker::Custom(Box::new(
+            move |area: &DrawingArea<SVGBackend, Shift>,
+                  y: i32,
+                  x0: i32,
+                  x1: i32|
+                  -> Result<(), Box<dyn std::error::Error>> {
+                const ON: i32 = 5;
+                const OFF: i32 = 3;
+                let mut x = x0;
+                let mut k = 0usize;
+                while x < x1 {
+                    let xe = (x + ON).min(x1);
+                    area.draw(&PathElement::new(
+                        vec![(x, y), (xe, y)],
+                        marker_colors[k % marker_colors.len()].stroke_width(2),
+                    ))?;
+                    k += 1;
+                    x += ON + OFF;
+                }
+                Ok(())
+            },
+        )),
+    });
+
+    draw_legend(
+        &chart.plotting_area().strip_coord_spec(),
+        &legend_entries,
+        ("Times New Roman", 25).into_font(),
+        LegendAnchor::UpperRight,
+        10,
+        Some(420),
+    )
+    .unwrap();
+
+    let (x_ticks, y_ticks) = (log_ticks(rmin, rmax, 0), log_ticks(rhomin, rhomax, 0));
 
     draw_ticks_top_and_right(
-        &inset_chart,
+        &chart,
         &x_ticks,
         &y_ticks,
-        (r_dm_min, r_dm_max),
-        (rho_dm_min, rho_dm_max),
+        (rmin, rmax),
+        (rhomin, rhomax),
         5,
-        BLACK.stroke_width(1),
+        BLACK.stroke_width(3),
     )
     .unwrap();
 
     root.present().unwrap();
 
-    svg_to_pdf("figures/cdm_vs_sidm_stable").unwrap();
+    svg_to_pdf("figures/fit_comparison", 25.0).unwrap();
 }
 
 pub fn create_cross_section_deviation_relation_plot(
@@ -695,7 +873,7 @@ pub fn create_cross_section_deviation_relation_plot(
     let deviations: Vec<_> = cross_sections.to_vec().par_iter().map(|cross_section| {
         let file_name = make_file_name(num_walkers, steps, prior, &Some(*cross_section));
 
-        if let Ok(output) = MCMCOutput::load(&(String::from("data/") + &file_name + "_stable.mcmc")) {
+        if let Ok(output) = MCMCOutput::load(&(String::from("data/") + &file_name + "_stable_bulk.mcmc")) {
             println!("File loaded for sigma/m={cross_section}");
             let chain = output.chain;
 
@@ -735,7 +913,7 @@ pub fn create_cross_section_deviation_relation_plot(
     plot_functions(
         &Vec::new(),
         &Vec::new(),
-        &(String::from("figures/cross_section_vs_deviation_stable.svg")),
+        &(String::from("figures/cross_section_vs_deviation_stable_bulk.svg")),
         "Deviation Dependence on Cross Section",
         "Cross Section (cm² / g)",
         "Deviation",
