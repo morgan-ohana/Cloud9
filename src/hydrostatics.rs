@@ -6,8 +6,9 @@ use plotters::style::{FontDesc, IntoFont};
 use rayon::prelude::*;
 
 use crate::halo::{Halo, m200_c200_to_rs_rhos, rs_rhos_to_m200_c200};
+use crate::plot_utils::formatting::fmt_num;
 use crate::plot_utils::frame::{draw_ticks_top_and_right, log_ticks};
-use crate::plotting::{draw_functions_on_area, fmt_num, plot_functions};
+use crate::plotting::{draw_functions_on_area, plot_functions};
 
 use crate::plot_utils::build::svg_to_pdf;
 use crate::temperature::{self, TnRelation};
@@ -965,33 +966,31 @@ pub fn instability_profile<
     }
 }
 
-pub fn instability_showcase<
+/// Result of scanning total gas mass vs central gas density for a set of halos.
+pub struct InstabilityScan {
+    /// Per parameter set: total gas mass at each point of the provided rho_axis.
+    pub ms_of_rhos: Vec<Vec<f64>>,
+    /// (rho_c, total gas mass) at each parameter set's own central density.
+    pub anchor_points: Vec<(f64, f64)>,
+    /// Outer radius of the integration grid actually used (for inset bounds).
+    pub r_max: f64,
+}
+
+/// Pure physics: hydrostatic mass scan for instability diagnostics.
+/// All plotting for this figure lives in plotting.rs.
+pub fn instability_mass_scan<
     T: Fn(f64) -> (f64, f64) + std::marker::Sync,
     V: Fn(f64, f64) -> f64 + std::marker::Sync,
 >(
-    params: &Vec<Vec<f64>>,
-    bounds: (f64, f64),
+    params: &[Vec<f64>],
+    rho_axis: &[f64],
     temperature: &T,
     neutral_fraction: &V,
-    font: FontDesc<'static>,
-) {
-    let rho_axis = {
-        const AXIS_GRID_NUM: usize = 100;
-        let mut rho_axis = Vec::with_capacity(AXIS_GRID_NUM);
-        for i in 0..AXIS_GRID_NUM {
-            rho_axis.push(
-                (bounds.0.ln()
-                    + (i as f64) * (bounds.1.ln() - bounds.0.ln()) / ((AXIS_GRID_NUM - 1) as f64))
-                    .exp(),
-            )
-        }
-        rho_axis
-    };
-
+) -> InstabilityScan {
     let r_min = 1e-5 * INNER_BOUND;
     let mut r_max = INNER_BOUND;
-    for i in 0..params.len() {
-        let halo = Halo::NFW(params[i][0], params[i][1]);
+    for p in params {
+        let halo = Halo::NFW(p[0], p[1]);
         r_max = r_max.max(1e3 * halo.r_crit());
     }
     let r_points = get_r_points((r_min, r_max));
@@ -1011,153 +1010,21 @@ pub fn instability_showcase<
         })
         .collect();
 
-    let points: Vec<(f64, f64)> = params
+    let anchor_points: Vec<(f64, f64)> = params
         .iter()
         .map(|params| {
             (
                 params[3],
-                get_profile_and_mass(&params, &r_points, temperature, neutral_fraction).1,
+                get_profile_and_mass(params, &r_points, temperature, neutral_fraction).1,
             )
         })
         .collect();
 
-    let legends: Vec<Option<String>> = params
-        .iter()
-        .map(|params| {
-            let (m200, c200) = rs_rhos_to_m200_c200(params[1], params[0]);
-            Some(format!(
-                "M₂₀₀ = {:.2e} C₂₀₀ = {:.2e} τ = {:.2}",
-                m200, c200, params[2]
-            ))
-        })
-        .collect();
-
-    let dashed = vec![true; ms_of_rhos.len()];
-
-    let root = SVGBackend::new("figures/instability_comp.svg", (1024, 768)).into_drawing_area();
-    root.fill(&WHITE).unwrap();
-
-    draw_functions_on_area(
-        &root,
-        &rho_axis,
-        &ms_of_rhos,
-        "Insability in Some Cloud-9-like Halos",
-        "Gas Central Density",
-        "Total Gas Mas",
-        legends,
-        font,
-        dashed,
-        Some(&points),
-        None,
-    )
-    .unwrap();
-
-    // Inset
-
-    let inset_rmax = 5e-5 * r_max;
-    let inset_rmin = INNER_BOUND;
-
-    const R_GRID_NUM: usize = 1000;
-    let inset_r_range: Vec<f64> = (0..R_GRID_NUM)
-        .into_iter()
-        .map(|i: usize| -> f64 {
-            (inset_rmin.ln()
-                + (i as f64 / (R_GRID_NUM - 1) as f64) * (inset_rmax.ln() - inset_rmin.ln()))
-            .exp()
-        })
-        .collect();
-
-    let mut dm_density = Vec::new();
-
-    let (mut rhos_max, mut rhos_min): (f64, f64) = (0.0, f64::MAX);
-    for p in params {
-        let dm_density_func = parametic_core_collapse(p[1], p[0], p[2]);
-        let dm_rho_pts: Vec<(f64, f64)> = inset_r_range
-            .iter()
-            .map(|&r| (r, dm_density_func(r)))
-            .collect();
-        dm_density.push(dm_rho_pts);
-
-        rhos_max = rhos_max.max(p[0]);
-        rhos_min = rhos_min.min(p[0]);
+    InstabilityScan {
+        ms_of_rhos,
+        anchor_points,
+        r_max,
     }
-    let (inset_rhomin, inset_rhomax) = (7e-1 * rhos_min, 5e0 * rhos_max);
-
-    let inset = root.clone().shrink((470, 270), (512, 400));
-    inset.fill(&WHITE).unwrap();
-
-    let mut inset_chart = ChartBuilder::on(&inset)
-        .margin(5)
-        .x_label_area_size(60)
-        .y_label_area_size(100)
-        .build_cartesian_2d(
-            (inset_rmin..inset_rmax).log_scale(),
-            (inset_rhomin..inset_rhomax).log_scale(),
-        )
-        .unwrap();
-
-    inset_chart
-        .configure_mesh()
-        .x_desc("r (kpc)")
-        .y_desc("Dark Matter Density (Mₛᵤₙ kpc⁻³)")
-        .x_label_style(("sans-serif", 25).into_font())
-        .y_label_style(("sans-serif", 25).into_font())
-        .x_labels(3)
-        .y_labels(10)
-        .x_label_formatter(&fmt_num)
-        .y_label_formatter(&fmt_num)
-        .draw()
-        .unwrap();
-
-    let colors = vec![&BLUE, &RED, &GREEN, &CYAN, &MAGENTA];
-    for i in 0..params.len() {
-        let color = colors[i];
-        let (m200, c200) = rs_rhos_to_m200_c200(params[i][1], params[i][0]);
-        inset_chart
-            .draw_series(LineSeries::new(dm_density[i].clone(), color))
-            .unwrap()
-            .label(format!("M₂₀₀ = {:.2e}, c₂₀₀= {:.2}", m200, c200))
-            .legend(move |(x, y)| {
-                PathElement::new(
-                    vec![(x, y), (x + 20, y)],
-                    ShapeStyle {
-                        color: color.mix(1.0),
-                        filled: false,
-                        stroke_width: 2,
-                    },
-                )
-            });
-    }
-
-    // // draw inset legend
-    // inset_chart
-    //     .configure_series_labels()
-    //     .label_font(("sans-serif", 25).into_font())
-    //     .position(SeriesLabelPosition::UpperRight)
-    //     .background_style(&WHITE.mix(0.8))
-    //     .border_style(&BLACK)
-    //     .draw()
-    //     .unwrap();
-
-    let (x_ticks, y_ticks) = (
-        log_ticks(inset_rmin, inset_rmax, 0),
-        log_ticks(inset_rhomin, inset_rhomax, -1),
-    );
-
-    draw_ticks_top_and_right(
-        &inset_chart,
-        &x_ticks,
-        &y_ticks,
-        (inset_rmin, inset_rmax),
-        (inset_rhomin, inset_rhomax),
-        5,
-        BLACK.stroke_width(1),
-    )
-    .unwrap();
-
-    root.present().unwrap();
-
-    svg_to_pdf("figures/instability_comp", 25.0).unwrap();
 }
 
 pub fn is_stable<T: Fn(f64) -> (f64, f64), V: Fn(f64, f64) -> f64>(

@@ -47,6 +47,7 @@ pub fn svg_to_pdf(output_path: &str, font_px: f64) -> Result<(), Box<dyn Error>>
     let font_pt = font_px * 0.75;
     let wrapper = format!(
         "\\documentclass{{standalone}}\n\
+         \\usepackage{{lmodern}}\n\
          \\usepackage{{graphicx, color}}\n\
          \\begin{{document}}%\n\
          \\sffamily\\fontsize{{{font_pt}}}{{{baseline:.1}}}\\selectfont%\n\
@@ -81,21 +82,28 @@ pub fn svg_to_pdf(output_path: &str, font_px: f64) -> Result<(), Box<dyn Error>>
 /// Rasterize the *typeset* PDF (not the SVG), so the PNG has the final
 /// LaTeX-rendered labels. Runs the full pipeline first, so calling this
 /// alone is sufficient.
-pub fn svg_to_png(output_path: &str, font_px: f64) -> Result<(), Box<dyn Error>> {
+pub fn svg_to_png(output_path: &str, font_px: f64, mu_pdf: bool) -> Result<(), Box<dyn Error>> {
     svg_to_pdf(output_path, font_px)?;
 
     let standalone_pdf = format!("{output_path}_standalone.pdf");
     let png_path = format!("{output_path}.png");
 
-    let status = Command::new("inkscape")
-        .args([
-            &standalone_pdf,
-            "--export-type=png",
-            "--export-filename",
-            &png_path,
-            &format!("--export-dpi={PNG_DPI}"),
-        ])
-        .status()?;
+    let status = if mu_pdf {
+        Command::new("mutool")
+            .args(["draw", "-r", "200", "-o", &png_path, &standalone_pdf, "1"])
+            .status()?
+    } else {
+        Command::new("inkscape")
+            .args([
+                &standalone_pdf,
+                "--export-type=png",
+                "--export-filename",
+                &format!("--export-dpi={PNG_DPI}"),
+                &png_path,
+            ])
+            .status()?
+    };
+
     if status.success() {
         Ok(())
     } else {

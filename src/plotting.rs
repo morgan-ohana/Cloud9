@@ -7,40 +7,19 @@ use rayon::prelude::*;
 
 use crate::constants::*;
 use crate::fitting;
+use crate::halo::rs_rhos_to_m200_c200;
 use crate::halo::{Halo, McrSource, deviation, m200_c200_to_rs_rhos};
 use crate::hydrostatics::core_collapse_background_3d_output;
-use crate::hydrostatics::instability_showcase;
+use crate::hydrostatics::instability_mass_scan;
 use crate::hydrostatics::is_stable;
 use crate::hydrostatics::parametic_core_collapse;
 use crate::hydrostatics::relhic_temperature_and_slope;
 use crate::hydrostatics::{core_collapse_background, relhic_neutral_fraction, relhic_temperature};
 // use crate::logging::load_file;
-use crate::plot_utils::{build::*, frame::*, legend::*, utils::*};
+use crate::plot_utils::{build::*, formatting::*, frame::*, legend::*};
 use crate::utils::make_file_name;
 use core::f64;
 use std::f64::consts::PI;
-
-/// 1.0e9 -> "1.0\times 10^{9}" (no $...$, so it composes into larger expressions)
-pub fn sci_latex(x: f64) -> String {
-    let exp = x.abs().log10().floor() as i32;
-    let mantissa = x / 10f64.powi(exp);
-    if (mantissa - 1.0).abs() < 1e-6 {
-        format!("10^{{{exp}}}")
-    } else {
-        format!("{mantissa:.1}\\times 10^{{{exp}}}")
-    }
-}
-
-pub fn fmt_num(num: &f64) -> String {
-    if num.abs() <= 1e-100 {
-        return "$0$".to_string();
-    }
-    if num.abs() >= 1000.0 || num.abs() <= 0.1 {
-        format!("${}$", sci_latex(*num))
-    } else {
-        format!("${num:.1}$")
-    }
-}
 
 pub fn plot_functions(
     x_points: &Vec<f64>,
@@ -341,13 +320,13 @@ where
     //println!("Plot saved as {}", filename);
     Ok(())
 }
-
 pub fn instability_plot() {
-    let stable = MCMCOutput::load("data/512_x_100k_stable.mcmc").unwrap();
-    let unstable = MCMCOutput::load("data/512_x_100k_unstable.mcmc").unwrap();
+    // ---- load chains, convert to (rho_s, r_s, tau, rho_c) ----
+    let stable = MCMCOutput::load("data/512_x_100k_stable_bulk.mcmc").unwrap();
+    let unstable = MCMCOutput::load("data/512_x_100k_unstable_bulk.mcmc").unwrap();
 
     let mut stable_params = stable.best_params;
-    let mut unstable_params = unstable.chain[1].clone();
+    let mut unstable_params = unstable.chain[0].clone();
     dbg!(&stable_params);
     dbg!(&unstable_params);
 
@@ -365,13 +344,218 @@ pub fn instability_plot() {
         &relhic_temperature_and_slope,
         &relhic_neutral_fraction
     ));
-    instability_showcase(
-        &vec![stable_params, unstable_params],
-        (1.5e3, 1e8),
+
+    let params = vec![stable_params, unstable_params];
+
+    // ---- physics scan ----
+    const AXIS_GRID_NUM: usize = 100;
+    let (rho_min, rho_max): (f64, f64) = (1.5e3, 1e8);
+    let rho_axis: Vec<f64> = (0..AXIS_GRID_NUM)
+        .map(|i| {
+            (rho_min.ln()
+                + (i as f64) * (rho_max.ln() - rho_min.ln()) / ((AXIS_GRID_NUM - 1) as f64))
+                .exp()
+        })
+        .collect();
+
+    let scan = instability_mass_scan(
+        &params,
+        &rho_axis,
         &relhic_temperature_and_slope,
         &relhic_neutral_fraction,
-        ("Times New Roman", 30).into_font(),
     );
+
+    // ---- main chart ----
+    let root = SVGBackend::new("figures/instability_comp.svg", (1024, 768)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
+
+    let mut y_min = f64::MAX;
+    let mut y_max = f64::MIN;
+    for curve in &scan.ms_of_rhos {
+        for &m in curve {
+            y_min = y_min.min(m);
+            y_max = y_max.max(m);
+        }
+    }
+    for &(_, m) in &scan.anchor_points {
+        y_min = y_min.min(m);
+        y_max = y_max.max(m);
+    }
+    let (y_min, y_max) = (y_min * 0.9, y_max * 1.25);
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("", ("Times New Roman", 40))
+        .margin(30)
+        .x_label_area_size(40)
+        .y_label_area_size(140)
+        .build_cartesian_2d((rho_min..rho_max).log_scale(), (y_min..y_max).log_scale())
+        .unwrap();
+
+    chart
+        .configure_mesh()
+        .x_desc("$\\rho_c$ ($\\mathrm{M}_\\odot\\, \\mathrm{kpc}^{-3}$)")
+        .y_desc("$M_{\\rm{gas}}$ ($\\mathrm{M}_\\odot$)")
+        .x_label_style(("Times New Roman", 25).into_font())
+        .y_label_style(("Times New Roman", 25).into_font())
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .x_labels(3)
+        .y_labels(15)
+        .axis_style(BLACK.stroke_width(3))
+        .draw()
+        .unwrap();
+
+    let colors = vec![BLUE, RED, GREEN, CYAN, MAGENTA];
+    let mut legend_entries: Vec<LegendEntry<SVGBackend>> = Vec::new();
+    for (i, curve) in scan.ms_of_rhos.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        let profile: Vec<(f64, f64)> = rho_axis
+            .iter()
+            .copied()
+            .zip(curve.iter().copied())
+            .collect();
+
+        chart
+            .draw_series(DashedLineSeries::new(
+                profile,
+                10,
+                10,
+                ShapeStyle {
+                    color: color.mix(1.0),
+                    filled: false,
+                    stroke_width: 2,
+                },
+            ))
+            .unwrap();
+
+        let (m200, c200) = rs_rhos_to_m200_c200(params[i][1], params[i][0]);
+        let tex = format!(
+            "$M_{{200}} = ${}, $c_{{200}} = ${}, $\\tau = {:.2}$",
+            fmt_num(&m200),
+            fmt_num(&c200),
+            params[i][2]
+        );
+        legend_entries.push(LegendEntry {
+            proxy: latex_to_proxy(&tex),
+            tex,
+            marker: LegendMarker::Dashed(color, 5, 3),
+        });
+    }
+    legend_entries.reverse();
+
+    // (rho_c, mass) anchor of each halo
+    chart
+        .draw_series(
+            scan.anchor_points
+                .iter()
+                .map(|p| Circle::new(*p, 5, ORANGE_700.filled())),
+        )
+        .unwrap();
+
+    draw_legend(
+        &chart.plotting_area().strip_coord_spec(),
+        &legend_entries,
+        ("Times New Roman", 25).into_font(),
+        LegendAnchor::UpperRight,
+        10,
+        Some(400),
+    )
+    .unwrap();
+
+    let (x_ticks, y_ticks) = (log_ticks(rho_min, rho_max, 0), log_ticks(y_min, y_max, -1));
+    draw_ticks_top_and_right(
+        &chart,
+        &x_ticks,
+        &y_ticks,
+        (rho_min, rho_max),
+        (y_min, y_max),
+        5,
+        BLACK.stroke_width(3),
+    )
+    .unwrap();
+
+    // ---- inset: DM density profiles ----
+    let inset_rmax: f64 = 5e-5 * scan.r_max;
+    let inset_rmin = INNER_BOUND;
+
+    const R_GRID_NUM: usize = 1000;
+    let inset_r_range: Vec<f64> = (0..R_GRID_NUM)
+        .map(|i| {
+            (inset_rmin.ln()
+                + (i as f64 / (R_GRID_NUM - 1) as f64) * (inset_rmax.ln() - inset_rmin.ln()))
+            .exp()
+        })
+        .collect();
+
+    let mut dm_density: Vec<Vec<(f64, f64)>> = Vec::new();
+    let (mut rhos_max, mut rhos_min): (f64, f64) = (0.0, f64::MAX);
+    for p in &params {
+        let dm_density_func = parametic_core_collapse(p[1], p[0], p[2]);
+        dm_density.push(
+            inset_r_range
+                .iter()
+                .map(|&r| (r, dm_density_func(r)))
+                .collect(),
+        );
+        rhos_max = rhos_max.max(p[0]);
+        rhos_min = rhos_min.min(p[0]);
+    }
+    let (inset_rhomin, inset_rhomax) = (7e-1 * rhos_min, 5e0 * rhos_max);
+
+    let inset = root.clone().shrink((470, 340), (510, 320));
+    inset.fill(&WHITE).unwrap();
+
+    let mut inset_chart = ChartBuilder::on(&inset)
+        .margin(5)
+        .x_label_area_size(30)
+        .y_label_area_size(140)
+        .build_cartesian_2d(
+            (inset_rmin..inset_rmax).log_scale(),
+            (inset_rhomin..inset_rhomax).log_scale(),
+        )
+        .unwrap();
+
+    inset_chart
+        .configure_mesh()
+        .x_desc("$r\\, (\\mathrm{kpc})$")
+        .y_desc("$\\textrm{Dark Matter Density}$ ($\\mathrm{M}_\\odot\\, \\mathrm{kpc}^{-3}$)")
+        .x_label_style(("sans-serif", 25).into_font())
+        .y_label_style(("sans-serif", 25).into_font())
+        .x_labels(3)
+        .y_labels(10)
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .axis_style(BLACK.stroke_width(3))
+        .draw()
+        .unwrap();
+
+    for i in 0..params.len() {
+        inset_chart
+            .draw_series(LineSeries::new(
+                dm_density[i].clone(),
+                colors[i % colors.len()].stroke_width(2),
+            ))
+            .unwrap();
+    }
+
+    let (x_ticks, y_ticks) = (
+        log_ticks(inset_rmin, inset_rmax, 0),
+        log_ticks(inset_rhomin, inset_rhomax, -1),
+    );
+    draw_ticks_top_and_right(
+        &inset_chart,
+        &x_ticks,
+        &y_ticks,
+        (inset_rmin, inset_rmax),
+        (inset_rhomin, inset_rhomax),
+        5,
+        BLACK.stroke_width(3),
+    )
+    .unwrap();
+
+    root.present().unwrap();
+
+    svg_to_pdf("figures/instability_comp", 25.0).unwrap();
 }
 
 pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
@@ -425,7 +609,7 @@ pub fn cdm_vs_sidm_fit_plot(data: &fitting::Data) {
     for p in &params {
         let (m200, c200, tau) = (p[0], p[1], p[2]);
         let (rs, rhos) = m200_c200_to_rs_rhos(m200, c200);
-        let halo = Halo::NFW(rs, rhos);
+        let halo = Halo::NFW(rhos, rs);
         let dev = deviation(m200, c200, McrSource::DiemerJoyce2019);
         let mut t_sigma_m = 150.0 * tau / (0.75 * rhos * rs * (4.0 * PI * GG * rhos).sqrt())
             * (KM_IN_KPC / S_IN_GYR); // Gyr kpc^2 / M_sun
@@ -910,19 +1094,94 @@ pub fn create_cross_section_deviation_relation_plot(
         ));
     }
 
-    plot_functions(
-        &Vec::new(),
-        &Vec::new(),
-        &(String::from("figures/cross_section_vs_deviation_stable_bulk.svg")),
-        "Deviation Dependence on Cross Section",
-        "Cross Section (cm² / g)",
-        "Deviation",
-        Vec::new(),
-        font,
-        Vec::new(),
-        Some(&data),
-        Some(&y_err),
+    // Make chart
+    let root = SVGBackend::new(
+        "figures/cross_section_vs_deviation_stable_bulk.svg",
+        (1024, 768),
+    )
+    .into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let x_spread = data.last().unwrap().0 - data[0].0;
+    let x_min = data[0].0 - 0.1 * x_spread;
+    let x_max = data.last().unwrap().0 + 0.1 * x_spread;
+
+    let mut y_min = f64::MAX;
+    let mut y_max = f64::MIN;
+    for &(yl, yh) in &y_err {
+        y_min = y_min.min(yl);
+        y_max = y_max.max(yh);
+    }
+    let y_pad = 0.1 * (y_max - y_min);
+    let (y_min, y_max) = (y_min - y_pad, y_max + y_pad);
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("", ("Times New Roman", 40))
+        .margin(30)
+        .x_label_area_size(40)
+        .y_label_area_size(100)
+        .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("$\\sigma/m$ ($\\mathrm{cm}^{2}\\, \\mathrm{g}^{-1}$)")
+        .y_desc("$\\textrm{Deviation}$")
+        .x_label_style(("Times New Roman", 25).into_font())
+        .y_label_style(("Times New Roman", 25).into_font())
+        .x_label_formatter(&fmt_num)
+        .y_label_formatter(&fmt_num)
+        .x_labels(5)
+        .y_labels(10)
+        .axis_style(BLACK.stroke_width(3))
+        .draw()?;
+
+    // Draw points
+    chart.draw_series(
+        data.iter()
+            .map(|p| Circle::new(*p, 5, Into::<ShapeStyle>::into(&ORANGE_700).filled())),
     )?;
+
+    {
+        let cap_width = 0.02 * (x_max - x_min); // linear space
+        chart.draw_series(
+            data.iter()
+                .zip(y_err.iter())
+                .flat_map(|(&(x, _), &(yl, yh))| {
+                    let (x_left, x_right) = (x - 0.5 * cap_width, x + 0.5 * cap_width);
+                    let bar_style = ORANGE_700.stroke_width(3);
+                    let mut bar_series = vec![PathElement::new(vec![(x, yl), (x, yh)], bar_style)];
+
+                    if yl > y_min {
+                        bar_series.push(PathElement::new(
+                            vec![(x_left, yl), (x_right, yl)],
+                            bar_style,
+                        ));
+                    }
+                    if yh < y_max {
+                        bar_series.push(PathElement::new(
+                            vec![(x_left, yh), (x_right, yh)],
+                            bar_style,
+                        ));
+                    }
+                    bar_series
+                }),
+        )?;
+    }
+
+    let (x_ticks, y_ticks) = (linear_ticks(x_min, x_max, 5), linear_ticks(y_min, y_max, 8));
+    draw_ticks_top_and_right(
+        &chart,
+        &x_ticks,
+        &y_ticks,
+        (x_min, x_max),
+        (y_min, y_max),
+        5,
+        BLACK.stroke_width(3),
+    )?;
+
+    root.present()?;
+
+    svg_to_pdf("figures/cross_section_vs_deviation_stable_bulk", 25.0)?;
 
     Ok(())
 }
@@ -959,7 +1218,8 @@ pub fn create_mcr_deviation_plot(
     root.fill(&WHITE)?;
 
     let corner_plot_format = CornerPlotFormat {
-        font,
+        axis_font: font.clone(),
+        legend_font: font,
         ..Default::default()
     };
 
@@ -1033,7 +1293,8 @@ pub fn create_cross_section_plot(
     root.fill(&WHITE)?;
 
     let corner_plot_format = CornerPlotFormat {
-        font,
+        axis_font: font.clone(),
+        legend_font: font,
         ..Default::default()
     };
 

@@ -16,13 +16,13 @@ use crate::halo::{
     Halo, deviation, init_diemer_joyce, m200_c200_to_rs_rhos, mass_concentration_relation,
     rs_rhos_to_m200_c200,
 };
-use crate::hydrostatics::instability_showcase;
 use crate::hydrostatics::parametic_core_collapse;
 use crate::hydrostatics::relhic_temperature_and_slope;
 use crate::hydrostatics::{
     abg_background, core_collapse_background, evolution_profile, instability_profile, is_stable,
     relhic_neutral_fraction, relhic_temperature,
 };
+use crate::plot_utils::build::*;
 use crate::plotting::*;
 use crate::utils::*;
 
@@ -118,7 +118,7 @@ fn main() {
     //     ("sans-serif", 30).into_font(),
     // )
     // .unwrap();
-    // svg_to_pdf("figures/cross_section_vs_deviation_stable").unwrap();
+    // svg_to_pdf("figures/cross_section_vs_deviation_stable", 25.0).unwrap();
 
     let params: Vec<f64>;
     if mcmc_plots {
@@ -151,18 +151,20 @@ fn main() {
             filter_stable(output.clone(), data_path.clone(), fixed_cross_section);
         }
 
-        // instability_plot();
-
-        cdm_vs_sidm_fit_plot(&data);
-
         let stable_output = MCMCOutput::load(&(data_path.clone() + "_stable_bulk.mcmc")).unwrap();
         // let stable_chain = stable_output.chain.clone();
         // let unstable_output = MCMCOutput::load(&(data_path.clone() + "_unstable.mcmc")).unwrap();
 
+        // filter_low_mass_island(unstable_output, (data_path.clone() + "_unstable"));
+
+        // cdm_vs_sidm_fit_plot(&data);
+
+        // instability_plot();
+
         // let num_stable = stable_output.chain.len();
         // let num_unstable = unstable_output.chain.len();
 
-        get_3d_contour(&stable_output.chain, &bounds, "cells_stable");
+        // get_3d_contour(&stable_output.chain, &bounds, "cells_stable");
         // // get_3d_contour(&unstable_output.chain, &bounds, "cells_unstable");
 
         // filter_low_mass_island(stable_output.clone(), data_path.clone() + "_stable");
@@ -191,47 +193,6 @@ fn main() {
 
         // filter_cdm_island(stable_output.clone(), data_path.clone() + "_stable");
 
-        let cdmisland_output =
-            MCMCOutput::load(&(data_path.clone() + "_stable_cdmisland.mcmc")).unwrap();
-
-        let mut mean_log_dm_rho_c = 0.0;
-        let mut mean_square_log_dm_rho_c = 0.0;
-        let mut mean_dm_rho_c = 0.0;
-        let mut mean_square_dm_rho_c = 0.0;
-        for p in &cdmisland_output.chain {
-            let (rs, rhos) = m200_c200_to_rs_rhos(p[0], p[1]);
-            let dm_rho_c = parametic_core_collapse(rs, rhos, p[2])(0.0);
-
-            mean_log_dm_rho_c += dm_rho_c.ln();
-            mean_square_log_dm_rho_c += dm_rho_c.ln().powi(2);
-            mean_dm_rho_c += dm_rho_c;
-            mean_square_dm_rho_c += dm_rho_c.powi(2);
-        }
-        mean_log_dm_rho_c /= cdmisland_output.chain.len() as f64;
-        mean_square_log_dm_rho_c /= cdmisland_output.chain.len() as f64;
-        mean_dm_rho_c /= cdmisland_output.chain.len() as f64;
-        mean_square_dm_rho_c /= cdmisland_output.chain.len() as f64;
-
-        let log_dm_rho_c_standard_dev =
-            (mean_square_log_dm_rho_c - mean_log_dm_rho_c.powi(2)).sqrt();
-        let dm_rho_c_standard_dev = (mean_square_dm_rho_c - mean_dm_rho_c.powi(2)).sqrt();
-        dbg!(mean_log_dm_rho_c);
-        dbg!(log_dm_rho_c_standard_dev);
-        println!(
-            "cdm island DM rho_c has mean {:.2e} and  1-sigma region: ({:.2e}, {:.2e})",
-            mean_log_dm_rho_c.exp(),
-            (mean_log_dm_rho_c - log_dm_rho_c_standard_dev).exp(),
-            (mean_log_dm_rho_c + log_dm_rho_c_standard_dev).exp()
-        );
-        dbg!(mean_dm_rho_c);
-        dbg!(dm_rho_c_standard_dev);
-        println!(
-            "cdm island DM rho_c has mean {:.2e} and 1-sigma region: ({:.2e}, {:.2e})",
-            mean_dm_rho_c,
-            (mean_dm_rho_c - dm_rho_c_standard_dev),
-            (mean_dm_rho_c + dm_rho_c_standard_dev)
-        );
-
         // dbg!(cdmisland_output.chain.len());
 
         // create_mcr_deviation_plot(
@@ -251,27 +212,32 @@ fn main() {
         // )
         // .unwrap();
 
-        // let corner_plot_format = CornerPlotFormat {
-        //     font: ("sans-serif", 35).into_font(),
-        //     log_scales: Some(log_scales),
-        //     hist_bins: 75,
-        //     contour_bins: 75,
-        //     x_label_height: 80,
-        //     y_label_width: 140,
-        //     ..Default::default()
-        // };
-        // create_corner_plot(
-        //     &output.chain,
-        //     &[],
-        //     // &["M₂₀₀", "c₂₀₀", "ρ꜀"],
-        //     &["M₂₀₀", "c₂₀₀", "τ", "ρ꜀"],
-        //     &(PathBuf::from(format!("figures/corner_plot_{file_name}.svg"))),
-        //     &bounds,
-        //     // &[bounds[0], bounds[1], bounds[3]],
-        //     corner_plot_format.clone(),
-        // )
-        // .unwrap();
-        // svg_to_png(&format!("figures/corner_plot_{file_name}")).unwrap();
+        let corner_plot_format = CornerPlotFormat {
+            axis_font: ("Times New Roman", 25).into_font(),
+            legend_font: ("Times New Roman", 20).into_font(),
+            log_scales: Some(log_scales),
+            hist_bins: 75,
+            contour_bins: 75,
+            x_label_height: 60,
+            y_label_width: 180,
+            margin: 50,
+            legend_widths: Some(vec![380, 220, 250, 350]),
+            tex: true,
+            do_hist_legend: false,
+            ..Default::default()
+        };
+        create_corner_plot(
+            &stable_output.chain,
+            &[],
+            // &["M₂₀₀", "c₂₀₀", "ρ꜀"],
+            &["$M_{200}$", "$c_{200}$", "$\\tau$", "$\\rho_c$"],
+            &(PathBuf::from(format!("figures/corner_plot_{file_name}.svg"))),
+            &bounds,
+            // &[bounds[0], bounds[1], bounds[3]],
+            corner_plot_format.clone(),
+        )
+        .unwrap();
+        svg_to_png(&format!("figures/corner_plot_{file_name}"), 25.0, true).unwrap();
         // create_corner_plot(
         //     &unstable_output.chain,
         //     &[],
@@ -340,36 +306,41 @@ fn main() {
         // }
         // dbg!(marked_points.len());
 
-        // let cross_sec_chain: Vec<Vec<f64>> = output
-        //     .chain
-        //     .iter()
-        //     .map(|params: &Vec<f64>| {
-        //         let deviation = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
-        //         let t_sigma_m = t_cross_section(params);
-        //         // dbg!(t_sigma_m / 10.0, deviation);
-        //         vec![t_sigma_m / 10.0, deviation]
-        //     })
-        //     .collect();
+        let cross_sec_chain: Vec<Vec<f64>> = output
+            .chain
+            .iter()
+            .map(|params: &Vec<f64>| {
+                let deviation = deviation(params[0], params[1], halo::McrSource::DiemerJoyce2019);
+                let t_sigma_m = t_cross_section(params);
+                // dbg!(t_sigma_m / 10.0, deviation);
+                vec![t_sigma_m / 10.0, deviation]
+            })
+            .collect();
 
-        // let mini_corner_plot_format = CornerPlotFormat {
-        //     font: ("sans-serif", 70).into_font(),
-        //     log_scales: Some(vec![true, false]),
-        //     x_label_height: 160,
-        //     y_label_width: 220,
-        //     hist_bins: 75,
-        //     contour_bins: 75,
-        //     ..Default::default()
-        // };
-        // create_corner_plot(
-        //     &cross_sec_chain,
-        //     &[],
-        //     &["σ/m", "Deviation"],
-        //     &(PathBuf::from(format!("figures/mini_corner_plot_{file_name}.svg"))),
-        //     &[[1e0, 5e4], [-7.0, 1.0]],
-        //     mini_corner_plot_format,
-        // )
-        // .unwrap();
-        // svg_to_png(&format!("figures/mini_corner_plot_{file_name}")).unwrap();
+        let mini_corner_plot_format = CornerPlotFormat {
+            axis_font: ("Times New Roman", 70).into_font(),
+            legend_font: ("Times New Roman", 50).into_font(),
+            log_scales: Some(vec![true, false]),
+            x_label_height: 160,
+            y_label_width: 370,
+            margin: 80,
+            hist_bins: 75,
+            contour_bins: 75,
+            legend_widths: Some(vec![250, 300]),
+            tex: true,
+            do_hist_legend: false,
+            ..Default::default()
+        };
+        create_corner_plot(
+            &cross_sec_chain,
+            &[],
+            &["$\\sigma/m$", "$\\textrm{Deviation}$"],
+            &(PathBuf::from(format!("figures/mini_corner_plot_{file_name}.svg"))),
+            &[[1e0, 5e4], [-7.0, 1.0]],
+            mini_corner_plot_format,
+        )
+        .unwrap();
+        svg_to_png(&format!("figures/mini_corner_plot_{file_name}"), 70.0, true).unwrap();
 
         // use rand::seq::SliceRandom;
         // let mut rng = rand::rng();
